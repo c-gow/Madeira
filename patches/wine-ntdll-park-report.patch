@@ -1,0 +1,122 @@
+From: Connor Gow <cmgow08@gmail.com>
+Subject: [PATCH] ntdll: [park-5s] report for thread-id alert waits stuck 5 seconds
+
+Applies to: the wine submodule, branch madeira-lgpl, at 723d1bf5132768276cea9bc35ab59c83557bb5fb
+  git -C wine apply ../patches/wine-ntdll-park-report.patch
+Needs ios_syscall_frame_regs() from build/ntdll-unix/signal_arm64_ios.c.
+
+Records the PE registers at park time; the periodic waiter census prints
+the wait address and its contents, the frame-pointer chain and code-like
+stack values of any INFINITE park older than 5 seconds. This is what
+located the FEX IntervalsLock self-deadlock (patches/fex-arm64ec-arena-notify.patch).
+
+Licence: LGPL-2.1-or-later, the licence of this Wine fork.
+Written with AI assistance (Claude); not for submission to WineHQ.
+
+Signed-off-by: Connor Gow <cmgow08@gmail.com>
+---
+diff --git a/dlls/ntdll/unix/sync.c b/dlls/ntdll/unix/sync.c
+index 9c9be7beca4..9caebb737eb 100644
+--- a/dlls/ntdll/unix/sync.c
++++ b/dlls/ntdll/unix/sync.c
+@@ -3901,8 +3901,75 @@ static struct
+     const void *addr;   /* wait-on-address cookie; NULL = not currently parked */
+     ULONGLONG since;    /* NtQuerySystemTime at park entry */
+     int inf;            /* 1 = INFINITE wait */
++    ULONG_PTR pe_pc, pe_lr, pe_fp, pe_sp;   /* PE registers at the syscall ([park-5s]) */
++    LONG reported;      /* [park-5s] already printed for this park */
+ } ios_alert_waiters[IOS_ALERT_WAITER_MAX];
+ 
++extern void ios_syscall_frame_regs( ULONG_PTR *pc, ULONG_PTR *lr, ULONG_PTR *fp, ULONG_PTR *sp );
++
++/* Is [addr, addr+len) mapped? msync() fails with ENOMEM on unmapped pages and
++ * never faults, which is what a report about an arbitrary thread needs. */
++static int ios_range_mapped( ULONG_PTR addr, size_t len )
++{
++    ULONG_PTR page = addr & ~0x3fffULL, end = addr + len;
++    for (; page < end; page += 0x4000)
++        if (msync( (void *)page, 0x4000, MS_ASYNC )) return 0;
++    return 1;
++}
++
++/* Plausible code address: JIT pool copies (0x14xxxxxxx-0x1ffffffff) or PE
++ * images (0x7000000000-0x7fffffffff, where this build maps DLLs). */
++static int ios_looks_like_code( ULONG_PTR v )
++{
++    return (v >= 0x140000000ULL && v < 0x200000000ULL) || (v >= 0x7000000000ULL && v < 0x8000000000ULL);
++}
++
++/* [park-5s]: one report per park that lasts 5 seconds: the wait address and
++ * its current contents, the PE registers at the syscall, the frame-pointer
++ * chain and code-like values on the stack. Maps offline to module+RVA with the
++ * "[jit-pool] image ... -> pool" and "Load module" lines. */
++static void ios_report_long_park( int i, int age_s )
++{
++    static LONG reports;
++    ULONG_PTR fp, sp, v, a = (ULONG_PTR)ios_alert_waiters[i].addr;
++    unsigned long long val = 0;
++    char buf[1024];
++    int n, k, found;
++
++    if (InterlockedIncrement( &reports ) > 24) return;
++    if (a > 0x10000 && ios_range_mapped( a & ~7ULL, 8 )) val = *(volatile unsigned long long *)(a & ~7ULL);
++    dprintf( 2, "[park-5s] tid=%04x addr=%p val@addr&~7=%016llx age=%ds inf=%d pc=%p lr=%p fp=%p sp=%p\n",
++             (unsigned int)(ULONG_PTR)ios_alert_waiters[i].tid & 0xffff, (void *)a, val, age_s,
++             ios_alert_waiters[i].inf, (void *)ios_alert_waiters[i].pe_pc, (void *)ios_alert_waiters[i].pe_lr,
++             (void *)ios_alert_waiters[i].pe_fp, (void *)ios_alert_waiters[i].pe_sp );
++
++    /* frame-pointer chain: {prev fp, lr} records */
++    n = snprintf( buf, sizeof(buf), "[park-5s]   fp-chain:" );
++    for (fp = ios_alert_waiters[i].pe_fp, k = 0; fp && k < 24 && n < (int)sizeof(buf) - 24; k++)
++    {
++        if ((fp & 7) || !ios_range_mapped( fp, 16 )) break;
++        n += snprintf( buf + n, sizeof(buf) - n, " %llx", ((unsigned long long *)fp)[1] );
++        v = ((ULONG_PTR *)fp)[0];
++        if (v <= fp) break;
++        fp = v;
++    }
++    dprintf( 2, "%s\n", buf );
++
++    /* stack scan: code-looking values in the first 2KB above sp */
++    n = snprintf( buf, sizeof(buf), "[park-5s]   stack-code:" );
++    sp = ios_alert_waiters[i].pe_sp;
++    for (k = 0, found = 0; sp && k < 256 && found < 32 && n < (int)sizeof(buf) - 24; k++)
++    {
++        ULONG_PTR slot = sp + k * 8;
++        if (!(slot & 0x3fff) || k == 0) { if (!ios_range_mapped( slot, 8 )) break; }
++        v = *(ULONG_PTR *)slot;
++        if (!ios_looks_like_code( v )) continue;
++        n += snprintf( buf + n, sizeof(buf) - n, " +%x:%llx", k * 8, (unsigned long long)v );
++        found++;
++    }
++    dprintf( 2, "%s\n", buf );
++}
++
+ static int ios_alert_waiter_slot( void *tid )
+ {
+     int i, free_i;
+@@ -3951,9 +4018,13 @@ void ios_alert_waiter_dump(void)
+     NtQuerySystemTime( &now );
+     for (i = 0; i < IOS_ALERT_WAITER_MAX; i++)
+     {
++        int age_s;
+         if (!ios_alert_waiters[i].addr) continue;
+         parked++;
+-        if ((now.QuadPart - (LONGLONG)ios_alert_waiters[i].since) / 10000000 >= 60) over++;
++        age_s = (int)((now.QuadPart - (LONGLONG)ios_alert_waiters[i].since) / 10000000);
++        if (age_s >= 60) over++;
++        if (age_s >= 5 && ios_alert_waiters[i].inf && !InterlockedExchange( &ios_alert_waiters[i].reported, 1 ))
++            ios_report_long_park( i, age_s );
+     }
+     dprintf( 2, "[waiters] parked=%d over60s=%d rev=ml444\n", parked, over );
+ 
+@@ -4276,6 +4347,9 @@ NTSTATUS WINAPI NtWaitForAlertByThreadId( const void *address, const LARGE_INTEG
+             NtQuerySystemTime( &ios_wnow );
+             ios_alert_waiters[ios_wslot].since = ios_wnow.QuadPart;
+             ios_alert_waiters[ios_wslot].inf = !timeout;
++            ios_syscall_frame_regs( &ios_alert_waiters[ios_wslot].pe_pc, &ios_alert_waiters[ios_wslot].pe_lr,
++                                    &ios_alert_waiters[ios_wslot].pe_fp, &ios_alert_waiters[ios_wslot].pe_sp );
++            ios_alert_waiters[ios_wslot].reported = 0;
+             ios_alert_waiters[ios_wslot].addr = address ? address : (const void *)0x1;
+         }
+ 

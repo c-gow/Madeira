@@ -255,6 +255,18 @@ struct syscall_frame
 
 C_ASSERT( sizeof( struct syscall_frame ) == 0x330 );
 
+/* Madeira: the PE-side registers saved at entry to this thread's current
+ * syscall. Used by the stuck-wait report in sync.c ([park-5s]) to say which
+ * code a parked thread is waiting in; zeros when there is no syscall frame. */
+void ios_syscall_frame_regs( ULONG_PTR *pc, ULONG_PTR *lr, ULONG_PTR *fp, ULONG_PTR *sp )
+{
+    struct syscall_frame *frame = get_syscall_frame();
+    *pc = frame ? frame->pc : 0;
+    *lr = frame ? frame->lr : 0;
+    *fp = frame ? frame->fp : 0;
+    *sp = frame ? frame->sp : 0;
+}
+
 #ifdef WINE_IOS
 /* Written by __wine_syscall_dispatcher at entry to capture the actual x18 value.
  * Read by the watchdog to verify whether x18 is TEB or 0. */
