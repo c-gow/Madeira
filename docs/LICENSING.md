@@ -26,7 +26,9 @@ plugins):
 |---|---|---|
 | `libmetalirconverter.dylib` (Apple Metal Shader Converter) | Apple proprietary; agreement s.2.B permits distribution solely for shader conversion; tracked in the repository (decision 2026-09-16) with the agreement and NOTICE beside it | loaded with dlopen by the DXMT/Madeira unix side; used only to convert DXIL to Metal libraries |
 | Apple system frameworks (Metal, Foundation, UIKit, ...) | Apple OS components | GPL-3 "System Library" |
-| PE DLLs in `arm64ec-windows/` (Wine builtins, FEX `libarm64ecfex.dll`, `d3d12.dll`, `winemetal.dll`) | as their sources above | separate files in the bundle |
+| `gl/libOSMesa.dylib`: Mesa 25.0.7 OSMesa + Zink + softpipe (desktop OpenGL backend) | MIT and other permissive licences (`licenses/Mesa-license.rst`) | built by `build/mesa-ios/build.sh`; Madeira's patches to Mesa (`build/mesa-ios/patches`) are offered under MIT |
+| `gl/libMoltenVK.dylib`: MoltenVK 1.4.2, containing SPIRV-Cross, SPIRV-Tools, cereal | Apache-2.0 (cereal BSD-3-Clause); texts in `licenses/` | built by `build/moltenvk-ios/build.sh`, unmodified; Apache-2.0 is compatible with GPL-3.0 |
+| PE DLLs in `arm64ec-windows/` (Wine builtins, FEX `libarm64ecfex.dll`, `d3d12.dll`, `winemetal.dll`) | as their sources above | separate files in the bundle; `opengl32.dll` is built with `patches/wine-opengl-winios.patch` applied |
 
 ## Obligations that follow
 

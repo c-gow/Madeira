@@ -45,7 +45,19 @@ git-ignored and consumed by the app project.
    - unix side: `build/dxmt-ios/build.sh` (needs `toolchains/llvm-ios-build`) -> `app/Madeira/libdxmt_combined.a` (ignored; the app links it). Verified this session.
    - PE side: `meson setup research/dxmt/build-arm64ec research/dxmt -Dbuildtype=release -Dwine_build_path=../../wine/build-arm64ec --cross-file=research/dxmt/build-arm64ec-win.txt` then `ninja -C research/dxmt/build-arm64ec src/winemetal/winemetal.dll` (and d3d11.dll) -> copied to `app/Madeira/arm64ec-windows/`. Verified this session (winemetal.dll).
 5. Native D3D12 runtime: `build/madeira-d3d12/build-pe.sh` -> `d3d12.dll`, `madeira_d3d12.dll` and the test executables in `app/Madeira/arm64ec-windows/` (tracked). Verified this session. `build/madeira-d3d12/fetch-converter.sh` re-verifies the converter library; `build/stage-licenses.sh` refreshes the bundled licence copies (the Xcode build fails if they are stale).
-6. App: `xcodebuild -project app/Madeira.xcodeproj -scheme Madeira -destination 'generic/platform=iOS' -allowProvisioningUpdates build` (Debug is the configuration that runs the games; Release builds have crashed the guest), then zip `Payload/Madeira.app` into an IPA and sideload. Verified this session on the development machine.
+6. OpenGL support (2026-09-26):
+   - The Wine change is carried as a patch until it lands in the fork:
+     `git -C wine apply ../patches/wine-opengl-winios.patch`; then rebuild
+     the Wine unix libraries (step 3) and the ARM64EC `opengl32.dll` (`make dlls/opengl32/arm64ec-windows/opengl32.dll`
+     in `wine/build-arm64ec`, `llvm-strip --strip-debug`, copy to
+     `app/Madeira/arm64ec-windows/`). The DLL is tracked, built this way.
+   - `build/moltenvk-ios/build.sh` (MoltenVK v1.4.2 in `research/MoltenVK`) and
+     `build/mesa-ios/build.sh` (Mesa 25.0.7 tarball, sha256 in the script, Python
+     deps in `research/mesa-venv`: `python3 -m venv research/mesa-venv &&
+     research/mesa-venv/bin/pip install meson mako pyyaml packaging`) ->
+     `app/Madeira/gl/lib{MoltenVK,OSMesa}.dylib` (git-ignored), the desktop-OpenGL
+     backend. Without them the app builds and uses its OpenGL ES backend. Both verified on the development machine 2026-09-26.
+7. App: `xcodebuild -project app/Madeira.xcodeproj -scheme Madeira -destination 'generic/platform=iOS' -allowProvisioningUpdates build` (Debug is the configuration that runs the games; Release builds have crashed the guest), then zip `Payload/Madeira.app` into an IPA and sideload. Verified this session on the development machine.
 
 ## Status of the LGPL relink question
 
