@@ -1,0 +1,174 @@
+From: Connor Gow <cmgow08@gmail.com>
+Subject: [PATCH] opengl32: OpenGL ES contexts for Madeira's winios WGL driver
+
+Applies to: the wine submodule, branch madeira-lgpl, at 723d1bf5132768276cea9bc35ab59c83557bb5fb
+  git -C wine apply ../patches/wine-opengl-winios.patch
+
+- unix_wgl.c: parse "OpenGL ES x.y" version strings; for GLES contexts,
+  trust the driver's dlsym-based lookup instead of the desktop GL_VERSION
+  gates, hide GLES-only extensions opengl32 has no thunks for, and add
+  GL_ARB_ES2/ES3_compatibility so SDL creates GLES contexts through WGL.
+  All under #ifdef WINE_IOS.
+- Makefile.in: the fixed 0x7a800000 image base only for i386/x86_64. On
+  iOS nothing maps below 4 GB; an ARM64EC opengl32 based there lost the TEB
+  in every call. app/Madeira/arm64ec-windows/opengl32.dll is built from this.
+- LICENSE-MADEIRA.md: records this third-party contribution.
+
+Licence: LGPL-2.1-or-later, the licence of this Wine fork.
+Written with AI assistance (Claude); not for submission to WineHQ as-is.
+
+Signed-off-by: Connor Gow <cmgow08@gmail.com>
+---
+diff --git a/LICENSE-MADEIRA.md b/LICENSE-MADEIRA.md
+index 05ad09b2ce1..97adaaaa385 100644
+--- a/LICENSE-MADEIRA.md
++++ b/LICENSE-MADEIRA.md
+@@ -23,6 +23,12 @@ distributes under **LGPL-2.1-or-later**. This branch keeps that licence.
+   their authors, each signed off under the DCO (see `CONTRIBUTING.md`):
+   - `feb96ad2be4` xinput: read Madeira host controller snapshots through
+     win32u. Author: 125hz. Merged from pull request #1 on 2026-09-25.
++  - opengl32: OpenGL ES contexts for Madeira's winios WGL driver
++    (`dlls/opengl32/unix_wgl.c`), the fixed low image base limited to x86
++    builds (`dlls/opengl32/Makefile.in`), and the `[park-5s]` stuck-wait
++    report (`dlls/ntdll/unix/sync.c`). Author: Connor Gow, written with AI
++    assistance, 2026-09-26. Carried as patches in the Madeira repository
++    (`patches/wine-opengl-winios.patch`, `patches/wine-ntdll-park-report.patch`).
+ 
+ The LGPL permits combining this library with proprietary components (such
+ as Apple's Metal Shader Converter) subject to LGPL-2.1 section 6; see the
+diff --git a/dlls/opengl32/Makefile.in b/dlls/opengl32/Makefile.in
+index 66ce5d289f3..0128f9cbf71 100644
+--- a/dlls/opengl32/Makefile.in
++++ b/dlls/opengl32/Makefile.in
+@@ -6,7 +6,12 @@ IMPORTS   = user32 gdi32 advapi32 win32u
+ DELAYIMPORTS = glu32
+ UNIX_LIBS    = -lwin32u
+ 
+-EXTRADLLFLAGS = -Wl,--image-base,0x7a800000
++# Madeira: the fixed low base is for the x86 builds only. On iOS nothing can be
++# mapped below 4 GB, and an ARM64EC opengl32 based at 0x7a800000 is loaded as
++# an emulated "sub-floor" window, where its thunks lost the TEB (NULL teb in
++# every wgl call).
++i386_EXTRADLLFLAGS = -Wl,--image-base,0x7a800000
++x86_64_EXTRADLLFLAGS = -Wl,--image-base,0x7a800000
+ 
+ VER_FILEDESCRIPTION_STR = "Wine OpenGL Client"
+ VER_PRODUCTVERSION      = 5,1,2600,2082
+diff --git a/dlls/opengl32/unix_wgl.c b/dlls/opengl32/unix_wgl.c
+index 00dfd96a551..e8cfeac099d 100644
+--- a/dlls/opengl32/unix_wgl.c
++++ b/dlls/opengl32/unix_wgl.c
+@@ -140,6 +140,9 @@ struct context
+     const char **extension_array;  /* array of supported extensions */
+     size_t extension_count;        /* size of supported extensions */
+     BOOL use_pinned_memory;        /* use GL_AMD_pinned_memory to emulate persistent maps */
++#ifdef WINE_IOS
++    BOOL is_gles;                  /* host context is OpenGL ES (Madeira winios driver) */
++#endif
+ 
+     /* semi-stub state tracker for wglCopyContext */
+     GLbitfield used;                            /* context state used bits */
+@@ -499,10 +502,51 @@ static const char *legacy_extensions[] =
+     NULL,
+ };
+ 
++#ifdef WINE_IOS
++/* GLES extensions whose entry points exist only in the GLES registry
++ * (OES/APPLE/EXT-suffixed names), so opengl32 has no thunks for them and
++ * wglGetProcAddress cannot return them. Advertising them makes loaders such as
++ * glad set the extension flag with NULL function pointers. Hiding them sends
++ * apps down the core OpenGL ES 3.0 paths, which opengl32 does thunk. */
++static const char *const gles_unthunked_extensions[] =
++{
++    "GL_APPLE_copy_texture_levels",
++    "GL_APPLE_framebuffer_multisample",
++    "GL_APPLE_sync",
++    "GL_EXT_discard_framebuffer",
++    "GL_EXT_disjoint_timer_query",
++    "GL_EXT_draw_buffers",
++    "GL_EXT_instanced_arrays",
++    "GL_EXT_map_buffer_range",
++    "GL_EXT_multisampled_render_to_texture",
++    "GL_EXT_occlusion_query_boolean",
++    "GL_EXT_robustness",
++    "GL_EXT_separate_shader_objects",
++    "GL_KHR_debug",
++    "GL_OES_EGL_image",
++    "GL_OES_EGL_image_external",
++    "GL_OES_get_program_binary",
++    "GL_OES_mapbuffer",
++    "GL_OES_texture_3D",
++    "GL_OES_vertex_array_object",
++};
++
++static BOOL is_gles_unthunked_extension( const char *name )
++{
++    for (int i = 0; i < ARRAY_SIZE(gles_unthunked_extensions); i++)
++        if (!strcmp( gles_unthunked_extensions[i], name )) return TRUE;
++    return FALSE;
++}
++#endif
++
+ static const char *parse_gl_version( const char *gl_version, int *major, int *minor )
+ {
+     const char *ptr = gl_version;
+ 
++#ifdef WINE_IOS
++    /* GLES contexts report "OpenGL ES major.minor ..." */
++    if (!strncmp( ptr, "OpenGL ES ", 10 )) ptr += 10;
++#endif
+     *major = atoi( ptr );
+     if (*major <= 0)
+         ERR( "Invalid OpenGL major version %d.\n", *major );
+@@ -964,6 +1008,14 @@ PROC wrap_wglGetProcAddress( TEB *teb, LPCSTR name )
+     {
+         void *driver_func = funcs->p_wglGetProcAddress( name );
+ 
++#ifdef WINE_IOS
++        /* GLES versions do not map onto the GL_VERSION_x_y gates (ES 3.0 has
++         * functions from desktop 3.0 through 4.3). The winios driver resolves
++         * names with dlsym, so a non-NULL result means the entry point exists. */
++        if (ctx->is_gles && driver_func)
++            TRACE( "%s provided by the OpenGL ES driver\n", name );
++        else
++#endif
+         if (!is_any_extension_supported( ctx, found->extension ))
+         {
+             WARN( "Extension %s required for %s not supported\n", found->extension, name );
+@@ -1204,6 +1256,10 @@ static void make_context_current( TEB *teb, const struct opengl_funcs *funcs, HD
+     if (version) rest = parse_gl_version( version, &ctx->major_version, &ctx->minor_version );
+     if (!ctx->major_version) ctx->major_version = 1;
+     TRACE( "context %p version %d.%d\n", ctx, ctx->major_version, ctx->minor_version );
++#ifdef WINE_IOS
++    /* Room for the ES compatibility extensions appended below. */
++    if ((ctx->is_gles = version && !strncmp( version, "OpenGL ES", 9 ))) size += 2;
++#endif
+ 
+     if (funcs->p_glImportMemoryWin32HandleEXT) size++;
+     if (funcs->p_glImportSemaphoreWin32HandleEXT) size++;
+@@ -1266,6 +1322,25 @@ static void make_context_current( TEB *teb, const struct opengl_funcs *funcs, HD
+ 
+     if (funcs->p_glImportMemoryWin32HandleEXT) extensions[count++] = "GL_EXT_memory_object_win32";
+     if (funcs->p_glImportSemaphoreWin32HandleEXT) extensions[count++] = "GL_EXT_semaphore_win32";
++#ifdef WINE_IOS
++    if (ctx->is_gles)
++    {
++        for (i = 0, j = 0; i < count; i++)
++        {
++            if (is_gles_unthunked_extension( extensions[i] )) TRACE( "-- %s (GLES-only entry points)\n", extensions[i] );
++            else extensions[j++] = extensions[i];
++        }
++        count = j;
++    }
++    /* A GLES context provides the ES entry points these extensions describe on
++     * desktop GL. SDL reads GL_ARB_ES3_compatibility to decide that WGL (rather
++     * than ANGLE's EGL) can create an OpenGL ES 3 context. */
++    if (ctx->is_gles)
++    {
++        extensions[count++] = "GL_ARB_ES2_compatibility";
++        if (ctx->major_version >= 3) extensions[count++] = "GL_ARB_ES3_compatibility";
++    }
++#endif
+     for (i = 0; legacy_extensions[i]; i++) extensions[count++] = legacy_extensions[i];
+     qsort( extensions, count, sizeof(*extensions), string_array_cmp );
+     ctx->extension_array = extensions;

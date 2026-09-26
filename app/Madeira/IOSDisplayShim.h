@@ -15,6 +15,8 @@
 // Register the CAMetalLayer that DXMT-rendered content should go into.
 // Must be called before the first D3D11 swapchain is created.
 void madeira_display_set_layer(CAMetalLayer *layer);
+// The CAMetalLayer an HWND's D3D or GL output goes to (unretained).
+CAMetalLayer *madeira_display_layer_for_hwnd(void *hwnd);
 #endif
 
 #endif

@@ -23,6 +23,9 @@ dependency license texts are in `LICENSES/`. See "Why GPL-3.0-or-later" below.
 | **xxHash** | BSD-2-Clause | Static (`libxxhash.a`). |
 | **Cephes** | permissive (Moshier) | Static (`libcephes_128bit.a`), via FEX. |
 | **Berkeley SoftFloat 3e** | BSD-3-Clause | Static (`libsoftfloat_3e.a`), via FEX. |
+| **Mesa** 25.0.7 (OSMesa, Zink, softpipe) | MIT (+ permissive, see `docs/license.rst`) | Patched (`build/mesa-ios/patches`). Separate dylib `gl/libOSMesa.dylib`, desktop OpenGL backend. |
+| **MoltenVK** 1.4.2 | Apache-2.0 | Unmodified. Separate dylib `gl/libMoltenVK.dylib`; contains SPIRV-Cross, SPIRV-Tools (Apache-2.0) and cereal (BSD-3-Clause). |
+| **LuaJIT** 2.1 | MIT | Unmodified. Separate x86-64 Windows DLL (`compat/love/lua51.dll`, built by `build/luajit-x64/build.sh`), copied into LOVE game folders in place of their `lua51.dll`. |
 
 ## Why GPL-3.0-or-later
 
