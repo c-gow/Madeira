@@ -833,6 +833,93 @@ static NTSTATUS alloc_handle_list( const PS_ATTRIBUTE *handles_attr, obj_handle_
     return STATUS_SUCCESS;
 }
 
+#ifdef WINE_IOS
+/* Read a whole file into a malloc'd buffer; returns its size or -1. */
+static long ios_read_whole_file( const char *path, char **data )
+{
+    long size = -1;
+    FILE *f;
+
+    *data = NULL;
+    if (!(f = fopen( path, "rb" ))) return -1;
+    if (!fseek( f, 0, SEEK_END ) && (size = ftell( f )) > 0 && !fseek( f, 0, SEEK_SET ) &&
+        (*data = malloc( size )) && fread( *data, 1, size, f ) != (size_t)size)
+    {
+        free( *data );
+        *data = NULL;
+    }
+    fclose( f );
+    return *data ? size : -1;
+}
+
+/* Madeira: swap a GC64 LuaJIT into LOVE games before they start.
+ *
+ * LOVE games (Balatro, ...) ship an x64 lua51.dll built without GC64, which
+ * needs every Lua object below 2 GB. iOS cannot map anything there, so
+ * luaL_newstate() returns NULL and love.exe crashes on its first Lua call.
+ * The app bundle carries a GC64 build (build/luajit-x64/build.sh) at
+ * <bundle>/compat/love/lua51.dll; the API is unchanged, so love.dll links
+ * against it as-is. Detection is by folder: an x64 exe next to both love.dll
+ * and lua51.dll. The game's own copy is kept as lua51.dll.madeira-orig, and a
+ * lua51.dll that already matches ours is left alone. Best effort: any failure
+ * is logged and the game starts with whatever lua51.dll it had. */
+static void ios_love_compat( const char *exe_unix_name )
+{
+    char dir[4096], game_dll[4200], orig_dll[4200], ours_path[4200];
+    const char *bundle = getenv( "WINEDLLPATH" ), *slash;
+    char *ours = NULL, *theirs = NULL;
+    long ours_size, theirs_size;
+    FILE *out;
+
+    if (!exe_unix_name || !bundle || !(slash = strrchr( exe_unix_name, '/' ))) return;
+    if ((size_t)(slash - exe_unix_name) >= sizeof(dir)) return;
+    memcpy( dir, exe_unix_name, slash - exe_unix_name );
+    dir[slash - exe_unix_name] = 0;
+
+    snprintf( game_dll, sizeof(game_dll), "%s/love.dll", dir );
+    if (access( game_dll, F_OK )) return;
+    snprintf( game_dll, sizeof(game_dll), "%s/lua51.dll", dir );
+    if (access( game_dll, F_OK )) return;
+    snprintf( orig_dll, sizeof(orig_dll), "%s/lua51.dll.madeira-orig", dir );
+    snprintf( ours_path, sizeof(ours_path), "%s/compat/love/lua51.dll", bundle );
+
+    if ((ours_size = ios_read_whole_file( ours_path, &ours )) < 0)
+    {
+        ERR( "[love-compat] LOVE game in %s but %s is missing\n", dir, ours_path );
+        return;
+    }
+    theirs_size = ios_read_whole_file( game_dll, &theirs );
+    if (theirs_size == ours_size && !memcmp( ours, theirs, ours_size ))
+    {
+        ERR( "[love-compat] %s already uses the GC64 LuaJIT\n", dir );
+        goto done;
+    }
+
+    /* Keep the game's own build; a later game update replaces lua51.dll again,
+     * and that newer copy becomes the backup. */
+    if (rename( game_dll, orig_dll ))
+    {
+        ERR( "[love-compat] could not back up %s: %s\n", game_dll, strerror( errno ) );
+        goto done;
+    }
+    if (!(out = fopen( game_dll, "wb" )) || fwrite( ours, 1, ours_size, out ) != (size_t)ours_size)
+    {
+        ERR( "[love-compat] could not write %s: %s -- restoring the original\n", game_dll, strerror( errno ) );
+        if (out) fclose( out );
+        unlink( game_dll );
+        rename( orig_dll, game_dll );
+        goto done;
+    }
+    fclose( out );
+    ERR( "[love-compat] %s: installed GC64 LuaJIT (%ld bytes), original kept as lua51.dll.madeira-orig\n",
+         dir, ours_size );
+
+done:
+    free( ours );
+    free( theirs );
+}
+#endif
+
 /**********************************************************************
  *           NtCreateUserProcess  (NTDLL.@)
  */
@@ -1369,6 +1456,9 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
         }
         goto done;
     }
+#ifdef WINE_IOS
+    if (pe_info.machine == IMAGE_FILE_MACHINE_AMD64) ios_love_compat( unix_name );
+#endif
     if (!machine)
     {
         /* Owner-aware (X3): the SPAWNER's identity decides hybrid-image

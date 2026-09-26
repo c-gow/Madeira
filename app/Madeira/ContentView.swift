@@ -1520,6 +1520,7 @@ struct ContentView: View {
 
     private func logEntitlementStatus() {
         guard let ents = entitlements else { return }
+        logStore.log("Madeira \(BuildInfo.summary)", level: .success)
         logStore.log("Checking entitlements...")
         logStore.log("  allow-jit: \(ents.jitAllowed)", level: ents.jitAllowed ? .success : .error)
         logStore.log("  increased-memory-limit: \(ents.increasedMemory)", level: ents.increasedMemory ? .success : .debug)
@@ -3187,6 +3188,9 @@ struct SetupGuideView: View {
                 Section("About") {
                     Text("Madeira is a proof-of-concept for running x86 Windows games on iOS using FEX-Emu, Wine, and Metal-based graphics translation.")
                         .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text("Madeira \(BuildInfo.summary)")
+                        .font(.caption.monospaced())
                         .foregroundColor(.secondary)
                 }
             }

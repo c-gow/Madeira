@@ -4303,6 +4303,7 @@ void ios_jit_sync_write(void *addr, size_t size)
 #define X18_ROLE_RN   1  /* bits[9:5] = base register for loads/stores/data-proc */
 #define X18_ROLE_RM   2  /* bits[20:16] = second register (MOV, register offset) */
 #define X18_ROLE_RT2  3  /* bits[14:10] = second register in LDP/STP */
+#define X18_ROLE_RT   4  /* bits[4:0] = the register being STORED (64-bit STR/STUR/STP) */
 
 static int ios_insn_x18_role(uint32_t insn)
 {
@@ -4310,7 +4311,8 @@ static int ios_insn_x18_role(uint32_t insn)
     int rn = (insn >> 5) & 0x1f;
     int rm = (insn >> 16) & 0x1f;
     int rt2 = (insn >> 10) & 0x1f;
-    if (rn != 18 && rm != 18 && rt2 != 18) return X18_ROLE_NONE;
+    int rt = insn & 0x1f;
+    if (rn != 18 && rm != 18 && rt2 != 18 && rt != 18) return X18_ROLE_NONE;
 
     /* Classify instruction to verify the field is actually a register */
     uint32_t top8 = insn >> 24;
@@ -4373,7 +4375,55 @@ static int ios_insn_x18_role(uint32_t insn)
         if (rm == 18) return X18_ROLE_RM;
     }
 
+    /* x18 as the VALUE stored: `str x18, [sp, #n]` / `stp x18, xM, [sp, #n]`.
+     * This is NtCurrentTeb() written into a struct -- Wine's opengl32 thunks do
+     * it in nearly every function (`.teb = NtCurrentTeb()` in each params
+     * struct: 3,102 sites), and on iOS it stored a zeroed x18, so every GL call
+     * reached the unix side with teb == NULL. Only the plain 64-bit store forms
+     * are recognised: STR (unsigned offset), STUR, STP (signed offset). Loads
+     * INTO x18 are never patched. */
+    if (rt == 18 && rn != 18)
+    {
+        if ((insn & 0xFFC00000) == 0xF9000000) return X18_ROLE_RT;                /* STR  Xt, [Xn, #imm12*8] */
+        if ((insn & 0xFFE00C00) == 0xF8000000) return X18_ROLE_RT;                /* STUR Xt, [Xn, #simm9] */
+        if ((insn & 0xFFC00000) == 0xA9000000 && rt2 != 18) return X18_ROLE_RT;   /* STP  Xt, Xt2, [Xn, #simm7*8] */
+    }
+
     return X18_ROLE_NONE;
+}
+
+/* The trampoline pushes its scratch register (`str xS, [sp, #-16]!`) before
+ * running the rewritten instruction, so an SP-based X18_ROLE_RT store must
+ * address 16 bytes further up. Returns FALSE when the adjusted offset does not
+ * encode (the site is then left unpatched). */
+static BOOL ios_insn_x18_store_sp_fixup( uint32_t *insn )
+{
+    uint32_t v = *insn;
+    int64_t imm;
+
+    if (((v >> 5) & 0x1f) != 31) return TRUE;                  /* base is not SP */
+    if ((v & 0xFFC00000) == 0xF9000000)                        /* STR: imm12, scaled by 8 */
+    {
+        imm = ((v >> 10) & 0xfff) + 2;
+        if (imm > 0xfff) return FALSE;
+        *insn = (v & ~(0xfffu << 10)) | ((uint32_t)imm << 10);
+        return TRUE;
+    }
+    if ((v & 0xFFE00C00) == 0xF8000000)                        /* STUR: signed imm9, bytes */
+    {
+        imm = ((int64_t)((int32_t)(v << 11) >> 23)) + 16;
+        if (imm > 255) return FALSE;
+        *insn = (v & ~(0x1ffu << 12)) | (((uint32_t)imm & 0x1ff) << 12);
+        return TRUE;
+    }
+    if ((v & 0xFFC00000) == 0xA9000000)                        /* STP: signed imm7, scaled by 8 */
+    {
+        imm = ((int64_t)((int32_t)(v << 10) >> 25)) + 2;
+        if (imm > 63) return FALSE;
+        *insn = (v & ~(0x7fu << 15)) | (((uint32_t)imm & 0x7f) << 15);
+        return TRUE;
+    }
+    return FALSE;
 }
 
 /* Replace x18 in an instruction with a different register */
@@ -4384,6 +4434,7 @@ static uint32_t ios_insn_replace_x18(uint32_t insn, int role, int scratch)
     case X18_ROLE_RN:  return (insn & ~(0x1f << 5)) | (scratch << 5);
     case X18_ROLE_RM:  return (insn & ~(0x1f << 16)) | (scratch << 16);
     case X18_ROLE_RT2: return (insn & ~(0x1f << 10)) | (scratch << 10);
+    case X18_ROLE_RT:  return (insn & ~0x1fu) | scratch;
     default:           return insn;
     }
 }
@@ -4621,9 +4672,17 @@ int ios_jit_patch_x18(char *text_rw, char *text_rx, size_t text_size,
         int rt = insn & 0x1f;
         int rn = (insn >> 5) & 0x1f;
         int rm = (insn >> 16) & 0x1f;
-        if (rt == 17 || rn == 17 || rm == 17) scratch = 16;
+        int rt2 = (role == X18_ROLE_RT) ? (insn >> 10) & 0x1f : -1;   /* STP's second register */
+        uint32_t replaced;
+        if (rt == 17 || rn == 17 || rm == 17 || rt2 == 17) scratch = 16;
         /* Double-check: if both x16 and x17 are used, skip (extremely rare) */
-        if (scratch == 16 && (rt == 16 || rn == 16 || rm == 16))
+        if (scratch == 16 && (rt == 16 || rn == 16 || rm == 16 || rt2 == 16))
+        {
+            skipped++;
+            continue;
+        }
+        replaced = ios_insn_replace_x18(insn, role, scratch);
+        if (role == X18_ROLE_RT && !ios_insn_x18_store_sp_fixup( &replaced ))
         {
             skipped++;
             continue;
@@ -4686,7 +4745,7 @@ int ios_jit_patch_x18(char *text_rw, char *text_rx, size_t text_size,
             *(uint32_t *)(tramp_rw + tramp_off) = 0xF9400000 | ((slot_off / 8) << 10) | (scratch << 5) | scratch;
             tramp_off += 4;
             /* Modified instruction with x18 replaced by scratch */
-            *(uint32_t *)(tramp_rw + tramp_off) = ios_insn_replace_x18(insn, role, scratch);
+            *(uint32_t *)(tramp_rw + tramp_off) = replaced;
             tramp_off += 4;
             /* ldr xSCRATCH, [sp], #16 */
             *(uint32_t *)(tramp_rw + tramp_off) = (scratch == 17) ? 0xF84107F1 : 0xF84107F0;
@@ -8509,6 +8568,11 @@ extern const void *dwrite_unix_call_funcs[];
  * STATUS_NOT_IMPLEMENTED. */
 extern const void *winegstreamer_unix_call_funcs[];
 
+/* opengl32's unix side, compiled from wine/dlls/opengl32/unix_{wgl,thunks}.c
+ * into libntdll_unix.a (build/ntdll-unix/build.sh). */
+extern const void *opengl32_unix_call_funcs[];
+extern const void *opengl32_unix_call_wow64_funcs[];
+
 /* win32u's unix init, statically linked via libwin32u_unix.a. Renamed
  * from __wine_unix_lib_init in build/win32u-unix/build.sh so future
  * statically-linked unix libs can keep their own init without colliding.
@@ -8857,11 +8921,22 @@ static NTSTATUS load_builtin_unixlib( void *module, BOOL wow, const void **funcs
             libname = "win32u (stub table)";
             funcs64 = funcs_wow64 = (const void *)ios_stub_unix_call_table;
         } else if (match && strstr(match, "opengl32")) {
+            /* Real opengl32 unix side (OpenGL ES / desktop GL through the winios
+             * WGL driver). MADEIRA_NO_GL=1 keeps the old GL-absent stub table.
+             * The wow64 table's thunks convert every embedded guest pointer with
+             * ios_wow_host_ptr() (patches/wine-opengl-winios.patch: make_opengl),
+             * so 32-bit GL games (Quake 3 engine, GLQuake) reach the driver. */
             pthread_once( &ios_stub_tables_once, ios_init_stub_tables );
-            WARN_(module)("iOS: module %p (%s) -> GL-absent stub table (attach ok, wgl/gl NOT_SUPPORTED)\n",
-                          module, match);
-            libname = "opengl32 (GL-absent stub table)";
-            funcs64 = funcs_wow64 = (const void *)ios_gl_stub_unix_call_table;
+            if (getenv("MADEIRA_NO_GL")) {
+                WARN_(module)("iOS: module %p (%s) -> GL-absent stub table (MADEIRA_NO_GL)\n",
+                              module, match);
+                libname = "opengl32 (GL-absent stub table, MADEIRA_NO_GL)";
+                funcs64 = funcs_wow64 = (const void *)ios_gl_stub_unix_call_table;
+            } else {
+                libname = "opengl32 (winios WGL)";
+                funcs64 = (const void *)opengl32_unix_call_funcs;
+                funcs_wow64 = (const void *)opengl32_unix_call_wow64_funcs;
+            }
         } else {
             pthread_once( &ios_stub_tables_once, ios_init_stub_tables );
             WARN_(module)("iOS: no unix .so for module %p (unix_path=%s, modname=%s, mapped=%s), using stub table\n",
