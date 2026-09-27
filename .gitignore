@@ -181,3 +181,11 @@ research/remote-metal/host/rmetald.*
 app/Madeira/licenses/LICENSE-MADEIRA-GPL-3.0.txt
 app/Madeira/licenses/LICENSE-MADEIRA-EXCEPTION.txt
 research/madeira-d3d12/tests/offline/sm51/
+
+# FFmpeg (build/ffmpeg/build.sh): fetched upstream release + static archives
+app/Madeira/libavformat.a
+app/Madeira/libavcodec.a
+app/Madeira/libswresample.a
+app/Madeira/libavutil.a
+build/ffmpeg/src/
+build/ffmpeg/obj/

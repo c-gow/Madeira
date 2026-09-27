@@ -103,6 +103,11 @@ PATCHED_FILES=(
     # forensics were reading three-week-old mystery code. The submodule
     # copy adds the [srv-conn]/[tcp-state]/[tcp-enum] probes.
     "sock:$WINE_SRC/server/sock.c:sock.o"
+    # The fork's semaphore.c/completion.c carry the in-process fast-path and
+    # waiter-wake changes (inproc_sync.c and queue_ios.c call into them); the
+    # prebuilt base archive's copies predate those and leave undefined symbols.
+    "semaphore:$WINE_SRC/server/semaphore.c:semaphore.o"
+    "completion:$WINE_SRC/server/completion.c:completion.o"
 )
 
 echo "=== Building kill wrapper (without kill macro) ==="
@@ -179,6 +184,8 @@ REPLACEMENTS=(
     "event.o:event.o"
     "handle.o:handle.o"
     "inproc_sync.o:inproc_sync.o"   # ml1058
+    "semaphore.o:semaphore.o"
+    "completion.o:completion.o"
 )
 
 for entry in "${REPLACEMENTS[@]}"; do
