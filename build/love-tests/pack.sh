@@ -18,7 +18,7 @@
 set -eu
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="$HERE/out"
-BUNDLE_ID="${MADEIRA_BUNDLE_ID:-com.cgow.madeira}"
+BUNDLE_ID="${MADEIRA_BUNDLE_ID:-com.willfaust.madeora}"
 # Fused LOVE games save to %APPDATA%\<identity> (no LOVE\ level). The Windows
 # user name depends on how the prefix was made, so it is looked up.
 IDENTITY="madeira-love-tests"
