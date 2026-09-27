@@ -48,12 +48,11 @@ git-ignored and consumed by the app project.
 6. OpenGL and LOVE support (branch `opengltest`, 2026-09-26):
    - Submodule changes are carried as patches until they land in the forks:
      `git -C wine apply ../patches/wine-opengl-winios.patch`,
-     `git -C wine apply ../patches/wine-ntdll-park-report.patch`,
-     `git -C FEX apply ../patches/fex-arm64ec-arena-notify.patch`; then rebuild
-     the Wine unix libraries (step 3), `xtajit64.dll` (`build/fex-arm64ec/build.sh`)
-     and the ARM64EC `opengl32.dll` (`make dlls/opengl32/arm64ec-windows/opengl32.dll`
-     in `wine/build-arm64ec`, `llvm-strip --strip-debug`, copy to
-     `app/Madeira/arm64ec-windows/`). Both DLLs are tracked, built this way.
+     `git -C wine apply ../patches/wine-ntdll-park-report.patch`; then rebuild
+     the Wine unix libraries (step 3) and the ARM64EC `opengl32.dll`
+     (`make dlls/opengl32/arm64ec-windows/opengl32.dll` in `wine/build-arm64ec`,
+     `llvm-strip --strip-debug`, copy to `app/Madeira/arm64ec-windows/`). The DLL
+     is tracked, built this way.
    - `build/luajit-x64/build.sh`: GC64 LuaJIT `lua51.dll` for LOVE games, from
      `research/LuaJIT` (v2.1) -> `app/Madeira/compat/love/` (git-ignored).
    - `build/moltenvk-ios/build.sh` (MoltenVK v1.4.2 in `research/MoltenVK`) and
