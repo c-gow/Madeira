@@ -160,7 +160,147 @@ all `OUT err=0` — handshakes complete. Some TLS works (`gnutls_handshake COMPL
 failure is at the **TLS/WebSocket layer**, above the socket.
 
 **Real but NOT the blocker:** `GetAdaptersAddresses failed: 2` ×239 — our NSI bypass only serves
-the TCP module; the NDIS path (`eb004a11`) returns table=0.
+the TCP module; the NDIS path (`eb004a11`) returns table=0. (Fixed later in ml1290.)
+
+**ml1350 — the UI transport (localhost WebSocket) was a WoW64 argument bug.** Every
+`ws://localhost:6246x/transportsocket/` attempt logged `Unknown error 10038` (WSAENOTSOCK) in
+cef_log.txt while the kernel connect completed. `WSAEnumNetworkEvents` passes its event HANDLE as
+the InputBuffer of `IOCTL_AFD_GET_EVENTS`; the WoW64 thunk offset it as a guest pointer, so
+`wine_server_obj_handle` returned `0xfffffff0` and the ioctl failed STATUS_INVALID_HANDLE. Fixed in
+`wine/dlls/ntdll/unix/socket.c` (`afd_event_handle_arg`, `MADEIRA_AFD_EVENT_HANDLE=0` rolls back).
+Device result: transport connected and the login window appeared (log prev 15).
+
+**ml1360 — login window froze: winproc handles offset by the WoW64 thunks.** Every message to
+the login window died in `KeUserModeCallback` → guest jump to 0xffff0036 (FEX NoExec), then
+6770 `dispatch_user_callback ignoring exception`. 0xffff0036 is a Wine winproc handle;
+`wow64win` converts `win_proc_params.func` (CallWindowProc) and `lpfnWndProc` (RegisterClass)
+with `guest_ptr32`, so win32u's `get_winproc_ptr` did not recognise B+0xffff0036. Fixed in
+`build/win32u-unix/class_ios.c` (`ios_winproc_handle_arg`, `MADEIRA_WINPROC_HANDLE=0`).
+Separate, unexplained: log 163's transport on one port dropped after ~11 s and Chromium then
+retried only ::1. Accept trace budgets split so the next run records completions.
+
+**ml1370 — device status after ml1360 (logs 164–166).** Winproc fix confirmed (`[winproc-handle]`
+fired, zero "ignoring exception"). QR login completed once; a later start signed in from the
+saved login and showed the main UI with **NO CONNECTION** (CM not connected; the login page also
+logged `Failed to start auth session: result 3`). This is §2.3 again, now the main blocker.
+Accepts complete (`completing/accepted/delivered`) even in the run where the transport stalled
+(log 166: both accepted at 00:10:46, browser gave up 11 s later, then retried ::1 only).
+Browser UI thread fault: `LDADDAL w5,w5,[x24]` into an RX page → LSE atomics now emulated through
+the RW alias (`ios_lse_atomic_op`). New evidence feeds: `[steam-connlog]` (connection_log.txt,
+masked) and `[loopback-io]`. The "32-bit Windows" banner matches real Windows-on-ARM64 behavior
+(native ARM64 reported) and is not a defect.
+
+**ml1380 — §2.3 narrowed with Steam's own connection log (log 167).** GetCMListForConnect
+Web API: `status = 0` after 8–43 s. PingWebSocketCM to cmp1-iad1/lax1 (443 and 27018): fails in
+the same second, `timeout/neterror - Invalid`; Connect() → `ConnectFailed … (x.x.x.x:0)`. On the
+wire: TCP connects, TLS 1.3 handshake completes including the client Finished, no alert, then no
+WebSocket Upgrade (ml590's observation, now explained): the client rejects the peer after the
+handshake via CryptoAPI (cryptnet active at that moment). Server chains = Let's Encrypt Gen Y:
+leaf ← YE2 ← Root YE (cross-signed by ISRG Root X2) ← X2 (cross-signed by X1); api.steampowered.com
+leaf ← YR1 ← Root YR (cross by X1). OpenSSL validates both with Madeira's cacert.pem; AIA
+`ye.i.lencr.org` serves the CROSS-SIGNED Root YE, so "missing Root YE/YR" is refuted. Candidates
+left: revocation (CRL DPs ye2.c.lencr.org/117.crl, ye.c.lencr.org, x2.c.lencr.org; no OCSP),
+ECDSA P-384 signature verification through bcrypt, or SSL policy. `[cert-chain]`/`[cert-policy]`
+ml1380 diagnostics in crypt32 (all three PE builds) will name it. Also: the UI thread died of JIT
+pool exhaustion (896 MB, 32 carves / 738 MB tail, `free=0`, 0xdead fault) → frozen "Play anyway".
+
+**ml1400 — §2.3 ROOT CAUSE FOUND (log 169).** `[cert-chain]`: steam.exe's api.steampowered.com chains
+build fully (leaf ← YR1 ← Root YR ← ISRG Root X1, revocation clean) but X1 carries
+CERT_TRUST_IS_UNTRUSTED_ROOT (0x20), after earlier chains in the same process were trusted. Cause:
+`build/crypto-unix/crypt32_unixlib_ios.c` `enum_root_certs` popped+freed each host root — correct for
+per-process unix sides, wrong for Madeira's single shared unix side: the first importing pseudo-process
+drained the list, the next saw zero host roots, and rootstore's sync deleted the imported roots from
+HKLM\...\Root. Fixed with a persistent list and per-thread enumeration cursor (`MADEIRA_ROOT_ENUM_SHARED=0`
+rollback). The long-standing "Failed to start auth session: result 3" / PingWebSocketCM failures are
+expected to follow from this. Device-unverified.
+
+**ml1410 — ml1400 CONFIRMED (log 170): steam.exe logged on** (GetCMListForConnect, WebSocket pings,
+`RecvMsgClientLogOnResponse() : processing complete`), started the 340/380/420 downloads, lost the CM
+once (`ConnectionDisconnected('I/O Operation Failed')`, 27018 WebSocket) and re-logged on 9 s later.
+The freeze after it was a **wineserver use-after-free**: `[srv-own] read_request EOF tid=0240 pid=0060 ->
+kill_thread` (kill_thread does not cancel the thread's asyncs), then `list_remove` in
+`cancel_process_async` faulted (`req_cancel_async+0x158`, the store after `cancel_async()`). Inferred
+path (not observed): `async_terminate` → `thread_queue_apc` does not queue (owner TERMINATED; the
+other-thread fallback depends on `is_in_apc_wait`/`send_thread_signal`) → APC destroy →
+`async_set_result` → last ref dropped inside `cancel_async()`. Fix: hold a ref across the cancel; a request completed during its
+own cancel gets no `async_cancel` (explicit `ios_completed` bit, because a pending non-blocking async is
+already `signaled`). `MADEIRA_ASYNC_CANCEL_HOLD=0`; ASan host test reproduces the UAF with rollback.
+**Log 171: "Unexpected Transport Error (0x3000)"** = steam.exe↔steamwebhelper loopback transport. Two
+AcceptEx listeners (52649/52650) accepted both connections; both got the 554-byte upgrade request; only
+52650 was read (the 52649 side, which in logs 169/170 carries the 27 KB exchange, logged no read). Later
+webhelper retries to 52649 show only refused `[::1]` attempts. New `[loopback-wait] ml1410` (server:
+recv verdict / AFD poll / read-queue wake per loopback socket) and `[loopback-io] ml1410 recv-would-block`
+will split "never requested" / "pending, wake lost" / "woken, no data". OPEN.
+
+**ml1420 — logs 173-176.** Proven:
+- Log 173 (ml1400 build) logged on in 1 s and started the 340/380/420 + 220 downloads (~3.8 GB).
+- Log 175 (ml1410 build): transport fine (both loopback connections, 27 KB exchange, `wake-read`
+  seen), but no `LogOn()` in 5 min:
+  - The early JIT pool was 512 MB (sized from a direct launch; the client asks for 896) →
+    `TAIL REFUSED` → `EXEC ALLOC FAILED … honest fault at 0xdead`.
+  - Then Chrome_IOThread (webhelper) pegged at ~70% in `virtual_unwind` → `RtlLookupFunctionEntry`
+    → `LdrFindEntryForAddress` (aarch64 ntdll RVAs 0x67c20 / 0x777c4 / 0x3fc48) with a constant sp,
+    with `ios_jit_reverse_translate_addr` at 41-46% of all CPU.
+  - Inferred link: the 0xdead fault frame cannot be unwound, and call_seh_handlers / RtlUnwindEx
+    have no progress check.
+- Fixes:
+  - sticky-max early pool plus an 896 MB floor when the library has client entries
+    (`MADEIRA_POOL_STICKY_MAX=0`);
+  - unwind no-progress guard in signal_arm64.c (`MADEIRA_UNWIND_GUARD=0`, `[unwind-stall]`);
+  - pool-range reject + hint in the reverse lookup (`MADEIRA_JIT_REV_FAST=0`).
+- 64-bit Unity title black screen (log 174): 7 M emulated stores (anon RWX served as R+X pool
+  aliases). The durable plain-RW design is written up for ml1430 (needs FEX 16 KB SMC rounding).
+
+**ml1430 — THE STEAM POOL WALL (log 177).**
+- Symptom: the 896 MB pool is still exhausted — tail 720 MB, 30 live carves (17×32 MB), head 85 MB.
+  Then `EXEC ALLOC FAILED` → 0xdead on tid 02b4 while holding the FEX shared lock (`[deliver-hold]`) →
+  process deadlock → desktop frozen.
+- Root cause: generation pinning. `CodeBufferManager` is per process, and old generations live until
+  every thread's `CurrentCodeBuffer` moves on. The ml460 sweeper (CPUBackend.cpp
+  `IosMaybeSweepCodeBuffers`) only had ARM64EC threads registered (Module.cpp:1998). WoW64 syscalls
+  are a BLR out of the emitted block (BranchOps.cpp `DEF_OP(Syscall)`), so blocked threads pin their
+  generation.
+- Fix:
+  - WoW64 `BTCpuThreadInit` registers (`IosSweepRegisterThreadEx`, new `Migrated` flag) and points
+    `Pointers.SyscallHandlerFunc` at `IosWowSyscallEntry`.
+  - `HandleSyscallImpl` parks (`IosInSim=0`) around `Wow64SystemServiceEx` / `WineUnixCall` for
+    depth-0 syscalls whose `ReturningStackLocation` lies within 8 KB above the caller SP.
+  - A moved thread returns via `mov sp, RSL; mov x1, #0; br LoopTopFillSRA`.
+- Why the redirect is equivalent:
+  - `int 0x2e` bridges carry `FLAGS_BLOCK_END` on `_WIN32`.
+  - `SyscallOp` exits with RIP loaded from the context.
+  - OS_GENERIC writes no result.
+  - `FillStaticRegs` covers every SRA register.
+  - `ENTRY_FILL_SRA_SINGLE_INST_REG` is x1 on non-EC.
+- `MADEIRA_WOW_SYSCALL_SWEEP=0`. check-wow-sweep.py covers the invariants and the parking model. Device-unverified.
+- Log 179 confirmed it: 54 generations, 45-49 of 54 threads moved per sweep, the pool healthy.
+
+**ml1460/ml1470 — HELPER CONNECTIONS NEVER READ (log 181).**
+- Symptom: "unexpected error during startup". The webhelper's later connections to steam.exe's
+  loopback listener (~25 s, ~4 min) were accepted and delivered in the server, and the helper sent its
+  554-byte request. steam.exe never issued a recv or poll on them.
+- ml1460 `[accept-chain]` (server, `MADEIRA_ACCEPT_CHAIN_TRACE=0`) follows each marked loopback accept:
+  APC queued → result → IOCP post (value) → dequeue (immediate / after wait). This locates the break.
+- ml1470 `[ordered-profile]` (FEX WoW64): Multiblock=0, VectorTSOEnabled=1, HalfBarrierTSOEnabled=1 for
+  any process with `libcef.dll`/`chrome_elf.dll` beside its exe, or named in
+  `MADEIRA_ORDERED_PROFILE_EXES` / `_CLIENT` (the app names the Steam client). This follows GameNative's
+  FEX profile for launcher/CEF processes. Madeira's default had VectorTSO=0 and Multiblock=1 in both
+  processes. It might also bear on §7's Skia destination-pointer question: a vector-published pointer
+  seen stale is one mechanism for wrong destinations with otherwise-correct pixels (hypothesis).
+  `MADEIRA_ORDERED_PROFILE=0`.
+
+**ml1480 — ROOT CAUSE OF THE UNREAD CONNECTIONS (log 184).** The ordered profile was active and the error
+still came. `[accept-chain]`: accept for thread 0094 while it was busy (`in server wait=0`), completion
+APC `queued=0`, result posted as `STATUS_ALERTED` (0x101). The client never read that socket.
+- On iOS `send_thread_signal` always fails (`get_process_port` is `trace_data`, always 0). So
+  `queue_apc` returned 0 for any system APC to a thread not in an interruptible server wait, and
+  `thread_apc_destroy` completed the async with the APC status (`STATUS_ALERTED`, 0 bytes). For a
+  recv that is a 0-byte success, i.e. EOF. That plausibly explains the WebSocket CM drops too (UDP
+  shrugs off empty datagrams). Hypothesis until a log shows it.
+- Fix in `wine/server/thread.c` `queue_apc`, iOS only: APC_ASYNC_IO that cannot be signalled goes to
+  a same-process thread in an interruptible, non-suspended server wait, else stays queued on the
+  issuer. `[apc-requeue] ml1480`, `MADEIRA_APC_REQUEUE=0`. check-apc-requeue.py compiles the
+  production `queue_apc`.
 
 ---
 

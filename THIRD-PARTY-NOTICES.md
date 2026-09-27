@@ -15,10 +15,12 @@ dependency license texts are in `LICENSES/`. See "Why GPL-3.0-or-later" below.
 | **Wine** | LGPL-2.1-or-later | **GPL-3.0-or-later** | Fork relicensed under LGPL-2.1 §3, which expressly permits applying the ordinary GPL to a copy. `ntdll`, `wineserver`, `win32u`, ARM64EC loader modified for iOS. |
 | **FEX-Emu** | MIT | upstream MIT + **modifications GPL-3.0-or-later** | Forked. x86-64 → ARM64 translation. |
 | **DXMT** | MIT | upstream MIT + **modifications GPL-3.0-or-later** | Forked. D3D11 → Metal. |
+| **DXMT — Direct3D 9 / DXSO frontend** | **LGPL-2.1-or-later** | **GPL-3.0-or-later** | Imported into `research/dxmt` from a different fork of the same upstream: `https://github.com/dacevedo12/dxmt.git`, tag `v0.4-d3d9`, commit `e8dd4c656dcb74a6d970a30a397d1558b0e3fb2b` ("Copyright (c) 2023-2026 Feifan He for CodeWeavers"). That tag postdates upstream's MIT→LGPL relicense, so it is **not** MIT. Converted under LGPL-2.1 §3, which expressly permits distributing a copy under the ordinary GPL — the same route this repository took for its Wine fork. Licence text in `research/dxmt/COPYING.LIB`; the file-by-file list is in `research/dxmt/LICENSE-MADEIRA.md`. |
 | **rpmalloc** | 0BSD | 0BSD + **Will Faust's modifications GPL-3.0-or-later** | Nested submodule of FEX, forked to `willfaust/rpmalloc`. Commits by Ryan Houdek are **not** relicensed. |
 | **GMP** 6.3.0 | **LGPL-3.0-or-later** or GPL-2.0-or-later | Static (`libgmp.a`). |
 | **Nettle / Hogweed** 3.10.1 | **LGPL-3.0-or-later** or GPL-2.0-or-later | Static (`libnettle.a`, `libhogweed.a`). |
 | **GnuTLS** 3.8.9 | LGPL-2.1-or-later | Static (`libgnutls.a`). Used by Wine's bcrypt/secur32/crypt32. |
+| **FFmpeg** 7.1.1 — libavformat, libavcodec, libavutil, libswresample | **LGPL-2.1-or-later** | Static (`libavformat.a`, `libavcodec.a`, `libavutil.a`, `libswresample.a`). Configured `--disable-gpl --disable-nonfree --disable-version3`, `--disable-everything` plus the six WMA-family decoders (`wmav1,wmav2,wmapro,wmalossless,xma1,xma2`) and, since ml1980, the `mp3` and `wav` demuxers, the `mpegaudio` parser and the `mp1,mp2,mp3,pcm_u8,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_f64le` decoders, and since ml1990 the `mov` (MP4/MOV/M4A) demuxer -- still no H.264, HEVC or AAC decoder or parser, those streams are decoded by Apple's VideoToolbox/AudioToolbox (no protocols, no muxers); no GPL or non-free component is enabled, and no `--enable-version3` component, so the result is LGPL-2.1-or-later. Used only by `build/ntdll-unix/winegstreamer_unixlib_ios.c` and `build/ntdll-unix/wg_parser_av_ios.c`, which are winegstreamer's unix side on this port (the Windows WMA decoder MFT/DMO, and the wg_parser behind quartz's MP3/WAV splitters and, since ml1990, Media Foundation's MP4 source — upstream implements both with GStreamer, which does not exist on iOS). |
 | **{fmt}** | MIT | Static (`libfmt.a`), via FEX. |
 | **xxHash** | BSD-2-Clause | Static (`libxxhash.a`). |
 | **Cephes** | permissive (Moshier) | Static (`libcephes_128bit.a`), via FEX. |
@@ -26,6 +28,9 @@ dependency license texts are in `LICENSES/`. See "Why GPL-3.0-or-later" below.
 | **Mesa** 25.0.7 (OSMesa, Zink, softpipe) | MIT (+ permissive, see `docs/license.rst`) | Patched (`build/mesa-ios/patches`). Separate dylib `gl/libOSMesa.dylib`, desktop OpenGL backend. |
 | **MoltenVK** 1.4.2 | Apache-2.0 | Unmodified. Separate dylib `gl/libMoltenVK.dylib`; contains SPIRV-Cross, SPIRV-Tools (Apache-2.0) and cereal (BSD-3-Clause). |
 | **LuaJIT** 2.1 | MIT | Unmodified. Separate x86-64 Windows DLL (`compat/love/lua51.dll`, built by `build/luajit-x64/build.sh`), copied into LOVE game folders in place of their `lua51.dll`. |
+| **Zstandard educational decoder** | BSD-3-Clause or GPL-2.0 | BSD-3-Clause selected | `app/Madeira/SwiftSteam/zstd_edu.c/.h` (Meta Platforms). Decodes Steam's zstd content chunks. Madeira serializes its error-recovery wrapper across threads. Licence text in `LICENSES/ZSTD-BSD.txt`. |
+| **Native Steam client (`app/Madeira/SwiftSteam/`)** | Derived from Jfishin's Madeira Steam work, published here with the author's permission | GPL-3.0-or-later | Steam sign-in, owned-library and depot-download protocol code. Madeira removed the Steam Cloud, launch-emulator and DRM-related parts and rewrote the download orchestration, logging and sign-in flow (see `STEAM_INTEGRATION.md`). No Valve or third-party Steam binaries are included. |
+| **liblzma** | Public domain / 0BSD | System library | Linked dynamically from the iOS SDK (`/usr/lib/liblzma.5.dylib`) for Steam's LZMA content chunks; nothing is bundled. |
 
 ## Why GPL-3.0-or-later
 
@@ -61,7 +66,9 @@ lives in a separate submodule. Each fork therefore carries its own
 - `wine/LICENSE-MADEIRA.md` — the LGPL-2.1 §3 conversion, exactly what changed
   and the two deliberate exceptions.
 - `FEX/LICENSE-MADEIRA.md`, `research/dxmt/LICENSE-MADEIRA.md` — upstream MIT
-  preserved; Madeira's modifications GPL-3.0-or-later.
+  preserved; Madeira's modifications GPL-3.0-or-later. `research/dxmt`'s notice
+  also records the LGPL-2.1-or-later Direct3D 9 / DXSO import and its §3
+  conversion, file by file.
 - `FEX/External/rpmalloc/LICENSE-MADEIRA.md` — 0BSD preserved; only Will
   Faust's commits are GPL, and authorship is distinguishable via `git log`.
 
@@ -92,6 +99,9 @@ Do **not** assume that everything outside the submodules is original. It is not.
   fetched separately (see the open issue below).
 - `app/`, `tools/`, `scripts/` and `patches/` are largely original, but contain
   vendored and derived files too.
+- `app/Madeira/SwiftSteam/` is derived from Jfishin's Madeira Steam work
+  (published with the author's permission) and includes the BSD-licensed
+  Zstandard educational decoder.
 
 Rather than claim authorship of whole directories: **original Madeira-authored
 files that do not carry another license notice are licensed under
@@ -133,6 +143,20 @@ All three are unmodified upstream releases; no patches are applied. A reference
 to an upstream project would not have been enough on its own, which is why the
 tarballs themselves are here.
 
+FFmpeg is handled differently on purpose: its archives are **not** tracked as
+compiled binaries in this repository, so there is nothing here that a source
+tarball would have to correspond to. The build script fetches the unmodified
+upstream release itself and refuses to build anything else:
+
+- `.xtool/build-ffmpeg.sh` -- the exact build machinery and configure flags,
+  including the release (`7.1.1`), its download URL on `ffmpeg.org`, and the
+  SHA-256 (`733984395e0dbbe5c046abda2dc49a5544e7e0e1e2366bba849222ae9e3a03b1`)
+  that every run verifies before extracting. No patches are applied.
+
+Anyone distributing a built `.ipa` that contains these archives owes the same
+corresponding source as for the crypto stack above; the pinned version and
+checksum identify it exactly.
+
 ## Relinking and static linking
 
 The Wine-derived unix libraries and the crypto stack are linked **statically**
@@ -164,3 +188,14 @@ into a signed app.
 `LiveContainer/` and `research/LiveContainer/` are AGPL-3.0 reference copies
 used for local research. Both are gitignored, untracked, and no part of them is
 linked into or shipped with the app. They form no part of the combined work.
+# Madeira Dock executable
+
+The optional `arm64ec-windows/dockhost.exe` is a separately built proprietary
+Madeira Dock release, copyright (c) 2026 125hz. Its license permits distribution
+of unmodified executable releases with Madeira. Its source is maintained in a
+private repository and is not part of this source distribution.
+
+`arm64ec-windows/dock-notices.txt` accompanies the executable and contains its
+binary license plus the LLVM and MinGW-w64 runtime notices. Dock includes no
+Valve client files, game content or developer login. Users install official
+Steam files and authenticate their own account at runtime.

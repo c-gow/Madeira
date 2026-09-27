@@ -122,6 +122,46 @@ compile_unixlib "$WINE_SRC/dlls/opengl32/unix_thunks.c" "opengl32_thunks" "openg
 # iOS-Madeira 2026-08-03 (#79 transport): in-process NSI TCP connection
 # tables (nsiproxy.sys is not shipped; PE nsi.dll falls back to this).
 compile_one "$BUILD_DIR/nsi_unixlib_ios.c" "nsi_unixlib_ios"
+compile_one "$BUILD_DIR/nsi_network_ios.c" "nsi_network_ios"
+compile_one "$BUILD_DIR/nsi_ndis_ios.c" "nsi_ndis"
+compile_one "$BUILD_DIR/nsi_ip_ios.c" "nsi_ip"
+# MADEIRA 2026-09-15: dnsapi had NO unix side, so its DllMain printed "No
+# libresolv support" and every later DnsQuery_* went through a NULL unixlib
+# handle -- a host-side fault in __wine_unix_call_dispatcher that killed the
+# process (log n60).  dnsapi_unixlib_ios.c is upstream dlls/dnsapi/libresolv.c
+# with res_init/res_query/_res/h_errno rebound to /usr/lib/libresolv.9.dylib
+# through dlopen, so nothing new is added to the app's final link.
+compile_unixlib "$BUILD_DIR/dnsapi_unixlib_ios.c" "dnsapi_unixlib" "dnsapi" \
+    -I"$WINE_SRC/dlls/dnsapi"
+# MADEIRA 2026-09-19: winegstreamer's unix side is GStreamer, which does not
+# exist on iOS -- so the Windows WMA decoder MFT (CLSID_CWMADecMediaObject ->
+# wmadmod.dll -> CLSID_wg_wma_decoder in winegstreamer.dll) was absent and
+# FAudio fed xaudio2's mixer the COMPRESSED xWMA bytes as PCM (the static, and
+# the 8x-full-scale peaks in the audio census).  winegstreamer_unixlib_ios.c
+# replaces the wg_transform subset that dlls/winegstreamer/wma_decoder.c needs
+# with libavcodec (.xtool/build-ffmpeg.sh, LGPL configuration).  The
+# widl-generated mfobjects.h/mftransform.h that unixlib.h pulls in only exist
+# in a configured build tree's include dir, which $WINE_BUILD already is.
+FFMPEG_PREFIX="$REPO_ROOT/toolchains/ffmpeg-ios"
+compile_unixlib "$BUILD_DIR/winegstreamer_unixlib_ios.c" "winegstreamer_unixlib" "winegstreamer" \
+    -I"$WINE_SRC/dlls/winegstreamer" -I"$FFMPEG_PREFIX/include"
+# MADEIRA ml1990: the wg_parser's H.264/HEVC (VideoToolbox) and AAC
+# (AudioToolbox) decoders.  Its own translation unit with NO Wine header --
+# CoreFoundation and winnt.h disagree about several names -- so it is compiled
+# without the Wine include paths and config.h.  The app links VideoToolbox,
+# CoreMedia, CoreVideo and AudioToolbox (.xtool/prepare.py `frameworks`).
+echo -n "  wg_parser_apple_ios... "
+if xcrun -sdk iphoneos clang \
+    -arch arm64 -isysroot "$SDK" -miphoneos-version-min=17.0 \
+    -O2 -fPIC -fvisibility=hidden -fno-stack-protector -fno-strict-aliasing -Wall -Werror=implicit-function-declaration \
+    -c "$BUILD_DIR/wg_parser_apple_ios.c" -o "$OBJ_DIR/wg_parser_apple_ios.o" 2>"$OBJ_DIR/wg_parser_apple_ios.err"; then
+    echo "OK"
+    SUCCEEDED=$((SUCCEEDED + 1))
+else
+    echo "FAILED"
+    FAILED=$((FAILED + 1))
+    FAILED_FILES="$FAILED_FILES wg_parser_apple_ios"
+fi
 
 for src in $WINE_SRC/dlls/ntdll/unix/*.c; do
     name=$(basename "$src" .c)
@@ -168,9 +208,12 @@ echo ""
 echo "=== Building libntdll_unix.a ==="
 ar rcs "$OBJ_DIR/libntdll_unix.a" \
     "$OBJ_DIR/audio_null_ios.o" "$OBJ_DIR/madsync.o" "$OBJ_DIR/nsi_unixlib_ios.o" \
+    "$OBJ_DIR/nsi_network_ios.o" "$OBJ_DIR/nsi_ndis.o" "$OBJ_DIR/nsi_ip.o" \
     "$OBJ_DIR/gnutls_symtab_ios.o" "$OBJ_DIR/ws2_32_unixlib.o" \
     "$OBJ_DIR/bcrypt_unixlib.o" "$OBJ_DIR/secur32_unixlib.o" "$OBJ_DIR/crypt32_unixlib.o" \
     "$OBJ_DIR/dwrite_unixlib.o" "$OBJ_DIR/opengl32_wgl.o" "$OBJ_DIR/opengl32_thunks.o" \
+    "$OBJ_DIR/dnsapi_unixlib.o" \
+    "$OBJ_DIR/winegstreamer_unixlib.o" "$OBJ_DIR/wg_parser_apple_ios.o" \
     "$OBJ_DIR/cdrom.o" "$OBJ_DIR/debug.o" "$OBJ_DIR/env.o" "$OBJ_DIR/file.o" \
     "$OBJ_DIR/loader.o" "$OBJ_DIR/loadorder.o" "$OBJ_DIR/process.o" "$OBJ_DIR/registry.o" \
     "$OBJ_DIR/security.o" "$OBJ_DIR/serial.o" "$OBJ_DIR/server.o" \

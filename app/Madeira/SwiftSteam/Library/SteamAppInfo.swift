@@ -1,0 +1,478 @@
+// Derived from Jfishin's Madeira Steam client (https://github.com/Jfishin),
+// published in Madeira with the author's permission. Adapted for Madeira;
+// see STEAM_INTEGRATION.md and THIRD-PARTY-NOTICES.md.
+
+import Foundation
+
+/// Parsed app metadata from Steam PICS
+struct SteamAppInfo {
+    let appID: UInt32
+    var name: String = ""
+    var type: AppType = .game
+    /// Madeira ml1420: `common.type` as PICS sent it, for the hidden-app log.
+    var rawType: String = ""
+    var installDir: String = ""
+    var oslist: String = ""         // "macos", "windows", "macos,windows", etc.
+    var depots: [DepotInfo] = []
+    var launchConfigs: [LaunchConfig] = []
+    var buildID: UInt32 = 0
+    var freeToDownload = false
+    /// Madeira ml1710: third-party license agreements (`common.eulas`), in list order.
+    var eulas: [SteamEula] = []
+    /// Madeira ml1970: apps owning depots this app installs through `depotfromapp`,
+    /// so the install record names them the way Valve's client does.
+    var sharedOwners: [UInt32: SharedOwner] = [:]
+    /// Madeira ml1970: store artwork file names from `common.library_assets_full` /
+    /// `common.header_image`. Newer apps publish them under a hashed folder, so the
+    /// fixed legacy URL is missing for them. `parentID` names a demo's full game.
+    var libraryCapsule: String?
+    var libraryHero: String?
+    var headerImage: String?
+    var parentID: UInt32?
+
+    struct SharedOwner: Equatable {
+        var name: String
+        var installDir: String
+        var buildID: UInt32
+    }
+
+    // Cloud save info
+    var cloudSaveEnabled: Bool = false
+    var cloudSaveFiles: [CloudSaveFile] = []
+
+    enum AppType: String {
+        case game = "Game"
+        case dlc = "DLC"
+        case tool = "Tool"
+        case demo = "Demo"
+        case application = "Application"
+        case music = "Music"
+        case unknown = ""
+
+        var isPlayable: Bool {
+            self == .game || self == .demo || self == .application
+        }
+
+        /// Madeira ml1420: PICS does not capitalize type names consistently;
+        /// many older apps send "game" rather than "Game", and exact matching
+        /// left them out of the library. Match case-insensitively.
+        /// MADEIRA_STEAM_TYPE_FOLD=0 restores exact matching.
+        static let foldsCase = LibraryFlags.enabled("MADEIRA_STEAM_TYPE_FOLD")
+
+        init(pics raw: String, foldCase: Bool = AppType.foldsCase) {
+            if let exact = AppType(rawValue: raw) { self = exact; return }
+            guard foldCase else { self = .unknown; return }
+            self = [AppType.game, .dlc, .tool, .demo, .application, .music]
+                .first { $0.rawValue.caseInsensitiveCompare(raw) == .orderedSame } ?? .unknown
+        }
+    }
+
+    struct DepotInfo {
+        var depotID: UInt32
+        var name: String = ""
+        var maxSize: UInt64 = 0
+        var oslist: String = ""     // "macos", "windows", etc.
+        var osarch: String = ""     // "64", "32"
+        var dlcAppID: UInt32? = nil
+        var manifests: [String: UInt64] = [:]  // branch -> manifestID ("public" is default)
+        /// Compressed download size from the modern manifests-dict format
+        /// (`manifests.public.download`). 0 when PICS sent the legacy flat
+        /// gid format or omitted it.
+        var publicDownloadBytes: UInt64 = 0
+        /// On-disk size from `manifests.public.size`. 0 when absent.
+        var publicSizeBytes: UInt64 = 0
+        /// `sharedinstall "1"` marks redistributable depots (DirectX, VC++
+        /// runtimes) that live in Steam's common store, not the game dir —
+        /// excluded from size math.
+        var isSharedInstall: Bool = false
+        /// `config.language`: empty for common content, otherwise one
+        /// language pack ("english", "german", ...).
+        var language: String = ""
+        /// `config.lowviolence "1"`: regional alternate content.
+        var lowViolence: Bool = false
+        /// Madeira ml1400: `depotfromapp`: the depot belongs to another app and
+        /// the Windows client installs it as that app ("required app N").
+        var fromApp: UInt32? = nil
+
+        /// Check if depot is for the specified OS
+        func supports(os: String) -> Bool {
+            oslist.isEmpty || oslist.lowercased().contains(os.lowercased())
+        }
+
+        /// Get the public branch manifest ID
+        var publicManifestID: UInt64? {
+            manifests["public"]
+        }
+    }
+
+    struct LaunchConfig {
+        var executable: String = ""
+        var arguments: String = ""
+        var description: String = ""
+        var oslist: String = ""
+        var osarch: String = ""
+        var type: String = ""       // "default", "option1", etc.
+
+        func supports(os: String) -> Bool {
+            oslist.isEmpty || oslist.lowercased().contains(os.lowercased())
+        }
+    }
+
+    struct CloudSaveFile {
+        var root: String = ""      // "gameinstall", "WinMyDocuments", etc.
+        var path: String = ""      // Relative path pattern
+        var pattern: String = ""   // File pattern (e.g., "*.sav")
+        var recursive: Bool = false
+    }
+
+    // MARK: - Computed Properties
+
+    // ml1960: shared depots often omit manifests in the consuming app's PICS.
+    // Copy content metadata from the exact depot, preserving consumer filters.
+    mutating func inheritDepots(from owners: [UInt32: SteamAppInfo]) -> Int {
+        var changed = 0
+        for index in depots.indices {
+            let local = depots[index]
+            guard local.publicManifestID == nil, let owner = local.fromApp,
+                  let source = owners[owner]?.depots.first(where: { $0.depotID == local.depotID }),
+                  source.publicManifestID != nil else { continue }
+            depots[index].manifests = source.manifests
+            depots[index].publicDownloadBytes = source.publicDownloadBytes
+            depots[index].publicSizeBytes = source.publicSizeBytes
+            if local.oslist.isEmpty { depots[index].oslist = source.oslist }
+            if local.osarch.isEmpty { depots[index].osarch = source.osarch }
+            if local.language.isEmpty { depots[index].language = source.language }
+            depots[index].lowViolence = local.lowViolence || source.lowViolence
+            changed += 1
+        }
+        return changed
+    }
+
+    var supportsMac: Bool {
+        oslist.lowercased().contains("macos") || oslist.lowercased().contains("mac")
+    }
+
+    var supportsWindows: Bool {
+        oslist.lowercased().contains("windows") || oslist.isEmpty
+    }
+
+    /// Get depots for a specific platform
+    func depots(for os: String) -> [DepotInfo] {
+        depots.filter { $0.supports(os: os) }
+    }
+
+    /// Madeira: the depots a Windows client would install for this app,
+    /// following the same rules as Valve's DepotDownloader: matching OS,
+    /// architecture-neutral or matching osarch, common or requested-language
+    /// content, no low-violence alternates, no DLC or shared redistributables,
+    /// and only depots that publish a public manifest. A 64-bit selection
+    /// falls back to 32-bit depots when the app only publishes those.
+    func installDepots(os: String = "windows", arch: String = "64",
+                       language: String = "english") -> [DepotInfo] {
+        func select(_ arch: String) -> [DepotInfo] {
+            depots.filter { d in
+                d.supports(os: os) && d.dlcAppID == nil && !d.isSharedInstall &&
+                d.publicManifestID != nil && !d.lowViolence &&
+                (d.osarch.isEmpty || d.osarch == arch) &&
+                (d.language.isEmpty || d.language.caseInsensitiveCompare(language) == .orderedSame)
+            }.sorted { $0.depotID < $1.depotID }
+        }
+        let preferred = select(arch)
+        if arch == "64", !preferred.contains(where: { $0.osarch == "64" }),
+           depots.contains(where: { $0.osarch == "32" && $0.supports(os: os) }) {
+            return select("32")
+        }
+        return preferred
+    }
+
+    /// Madeira ml1390: every depot with why it was or was not selected, for the
+    /// install log ("sel", or the first failing rule). IDs and flags only.
+    func depotSelectionSummary(os: String = "windows", arch: String = "64",
+                               language: String = "english", limit: Int = 24) -> String {
+        let chosen = Set(installDepots(os: os, arch: arch, language: language).map(\.depotID))
+        return depots.sorted { $0.depotID < $1.depotID }.prefix(limit).map { d in
+            let why = selectionRule(d, chosen: chosen, os: os, language: language)
+            let from = d.fromApp.map { "<\($0)" } ?? ""
+            return "\(d.depotID)[\(d.osarch.isEmpty ? "-" : d.osarch)]\(why)\(from)"
+        }.joined(separator: ",")
+    }
+
+    /// "sel" or the first rule that left the depot out.
+    private func selectionRule(_ d: DepotInfo, chosen: Set<UInt32>, os: String, language: String) -> String {
+        if chosen.contains(d.depotID) { return "sel" }
+        if !d.supports(os: os) { return "os" }
+        if d.dlcAppID != nil { return "dlc" }
+        if d.isSharedInstall { return "shared" }
+        if d.publicManifestID == nil { return "nomanifest" }
+        if d.lowViolence { return "lowviolence" }
+        if !d.language.isEmpty && d.language.caseInsensitiveCompare(language) != .orderedSame { return "lang" }
+        return "arch"
+    }
+
+    /// Madeira: owned apps that can be installed for Windows at all.
+    var installableOnWindows: Bool {
+        supportsWindows && type.isPlayable && !installDepots().isEmpty
+    }
+
+    /// Madeira ml1420: why the library leaves this owned app out, or nil when
+    /// it is shown (the same rules as `installableOnWindows`). Short tokens only:
+    /// "type-<name>", "os", "nodepots", or "nodepot/" + skipped-depot rule counts.
+    var hiddenReason: String? {
+        if !type.isPlayable {
+            let allowed = Set("abcdefghijklmnopqrstuvwxyz0123456789")
+            let name = String(rawType.lowercased().filter { allowed.contains($0) }.prefix(12))
+            return "type-" + (name.isEmpty ? "none" : name)
+        }
+        if !supportsWindows { return "os" }
+        guard installDepots().isEmpty else { return nil }
+        if depots.isEmpty { return "nodepots" }
+        var counts: [String: Int] = [:]
+        for depot in depots { counts[selectionRule(depot, chosen: [], os: "windows", language: "english"), default: 0] += 1 }
+        return "nodepot/" + counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+            .map { "\($0.key)\($0.value)" }.joined(separator: "+")
+    }
+
+    /// Madeira ml1420: short reason for app info that did not parse.
+    static func parseFailure(_ buffer: Data) -> String {
+        if buffer.isEmpty { return "parse-empty" }
+        if String(data: buffer, encoding: .utf8) == nil { return "parse-utf8" }
+        return "parse-noname"
+    }
+
+    /// Approximate download size for a platform. Per depot, prefers the
+    /// modern `manifests.public.download` figure (compressed download —
+    /// present for most apps since Valve's 2023 PICS change), falling back
+    /// to the legacy `maxsize` field (absent for many apps, which is why
+    /// this used to come up empty). Depots tagged with a `dlcAppID`
+    /// (bonus/DLC content) and `sharedinstall` redistributables are
+    /// excluded — they're not part of the base install this figure is
+    /// meant to represent. Treat as "about".
+    func downloadSize(for os: String) -> UInt64 {
+        installDepots(os: os).reduce(0) { total, d in
+            let bytes = d.publicDownloadBytes > 0 ? d.publicDownloadBytes : d.maxSize
+            guard bytes > 0 else { return total }
+            // Sizes are parsed from untrusted PICS VDF strings with no
+            // bound — saturate instead of trapping if a malformed depot
+            // entry overflows the sum.
+            let (sum, overflow) = total.addingReportingOverflow(bytes)
+            return overflow ? UInt64.max : sum
+        }
+    }
+
+    /// Get launch configs for a specific platform
+    func launchConfigs(for os: String) -> [LaunchConfig] {
+        launchConfigs.filter { $0.supports(os: os) }
+    }
+
+    // MARK: - Parsing
+
+    /// Parse app info from a PICS text-VDF buffer.
+    static func parse(appID: UInt32, from data: Data) -> SteamAppInfo? {
+        let vdf = VDFParser.parseTextVDF(from: data)
+        return parse(appID: appID, from: vdf)
+    }
+
+    /// Parse app info from a VDF dictionary
+    static func parse(appID: UInt32, from vdf: [String: Any]) -> SteamAppInfo? {
+        var info = SteamAppInfo(appID: appID)
+
+        // Navigate to appinfo section
+        let appInfo: [String: Any]
+        if let nested = vdf["\(appID)"] as? [String: Any] {
+            appInfo = nested
+        } else if let nested = vdf["appinfo"] as? [String: Any] {
+            appInfo = nested
+        } else {
+            appInfo = vdf
+        }
+
+        // Common section
+        if let common = appInfo["common"] as? [String: Any] {
+            info.name = common["name"] as? String ?? ""
+            info.rawType = common["type"] as? String ?? ""
+            info.type = AppType(pics: info.rawType)
+            info.oslist = common["oslist"] as? String ?? ""
+            info.freeToDownload = (common["freetodownload"] as? String) == "1"
+            // ml1970: artwork names, english first, else any language.
+            func asset(_ node: Any?) -> String? {
+                guard let languages = node as? [String: Any] else { return nil }
+                let value = (languages["english"] as? String) ?? languages.keys.sorted().compactMap { languages[$0] as? String }.first
+                guard let value, !value.isEmpty, value.utf8.count <= 256, !value.contains(".."), !value.hasPrefix("/") else { return nil }
+                return value
+            }
+            if let assets = common["library_assets_full"] as? [String: Any] {
+                let capsule = assets["library_capsule"] as? [String: Any]
+                info.libraryCapsule = asset(capsule?["image2x"]) ?? asset(capsule?["image"])
+                info.libraryHero = asset((assets["library_hero"] as? [String: Any])?["image"])
+            }
+            info.headerImage = asset(common["header_image"])
+            if let parent = (common["parent"] as? String).flatMap(UInt32.init), parent != 0, parent != info.appID {
+                info.parentID = parent
+            }
+            if let list = common["eulas"] as? [String: Any] {
+                info.eulas = list.keys.sorted { (Int($0) ?? 0) < (Int($1) ?? 0) }.compactMap { key in
+                    guard let item = list[key] as? [String: Any], let id = item["id"] as? String, !id.isEmpty else { return nil }
+                    return SteamEula(id: id, name: item["name"] as? String ?? "", url: item["url"] as? String ?? "",
+                                     version: item["version"].map { "\($0)" } ?? "0")
+                }
+            }
+        }
+
+        // Config section
+        if let config = appInfo["config"] as? [String: Any] {
+            info.installDir = config["installdir"] as? String ?? ""
+            if let launchSection = config["launch"] as? [String: Any] {
+                for (_, launchData) in launchSection {
+                    guard let launch = launchData as? [String: Any] else { continue }
+                    var lc = LaunchConfig()
+                    lc.executable = launch["executable"] as? String ?? ""
+                    lc.arguments = launch["arguments"] as? String ?? ""
+                    lc.description = launch["description"] as? String ?? ""
+                    if let launchConfig = launch["config"] as? [String: Any] {
+                        lc.oslist = launchConfig["oslist"] as? String ?? ""
+                        lc.osarch = launchConfig["osarch"] as? String ?? ""
+                    }
+                    lc.type = launch["type"] as? String ?? ""
+                    info.launchConfigs.append(lc)
+                }
+            }
+        }
+
+        // Depots section
+        if let depots = appInfo["depots"] as? [String: Any] {
+            for (key, depotData) in depots {
+                guard let depotID = UInt32(key),
+                      let depot = depotData as? [String: Any] else { continue }
+
+                var di = DepotInfo(depotID: depotID)
+                di.name = depot["name"] as? String ?? ""
+                if let config = depot["config"] as? [String: Any] {
+                    di.oslist = config["oslist"] as? String ?? ""
+                    di.osarch = config["osarch"] as? String ?? ""
+                    di.language = config["language"] as? String ?? ""
+                    di.lowViolence = (config["lowviolence"] as? String) == "1"
+                }
+                if let maxSizeStr = depot["maxsize"] as? String, let maxSize = UInt64(maxSizeStr) {
+                    di.maxSize = maxSize
+                } else if let maxSize = depot["maxsize"] as? UInt32 {
+                    di.maxSize = UInt64(maxSize)
+                }
+                // Text-VDF leaves every leaf as String — check that first
+                // (the UInt32 branch is kept for any binary-VDF caller).
+                if let dlcStr = depot["dlcappid"] as? String, let dlc = UInt32(dlcStr) {
+                    di.dlcAppID = dlc
+                } else if let dlc = depot["dlcappid"] as? UInt32 {
+                    di.dlcAppID = dlc
+                }
+                di.isSharedInstall = (depot["sharedinstall"] as? String) == "1"
+                if let from = (depot["depotfromapp"] as? String).flatMap(UInt32.init), from != appID {
+                    di.fromApp = from
+                }
+                if let manifests = depot["manifests"] as? [String: Any] {
+                    for (branch, entry) in manifests {
+                        if let gidStr = entry as? String, let gid = UInt64(gidStr) {
+                            // Legacy flat format: branch -> gid string.
+                            di.manifests[branch] = gid
+                        } else if let gid = entry as? UInt64 {
+                            di.manifests[branch] = gid
+                        } else if let dict = entry as? [String: Any] {
+                            // Modern format (2023+): branch -> { gid, size,
+                            // download }. This is where most apps carry
+                            // their sizes now — many no longer set maxsize.
+                            if let gidStr = dict["gid"] as? String, let gid = UInt64(gidStr) {
+                                di.manifests[branch] = gid
+                            }
+                            if branch == "public" {
+                                if let dStr = dict["download"] as? String, let d = UInt64(dStr) {
+                                    di.publicDownloadBytes = d
+                                }
+                                if let sStr = dict["size"] as? String, let s = UInt64(sStr) {
+                                    di.publicSizeBytes = s
+                                }
+                            }
+                        }
+                    }
+                }
+                info.depots.append(di)
+            }
+
+            // Build ID
+            if let branches = depots["branches"] as? [String: Any],
+               let publicBranch = branches["public"] as? [String: Any] {
+                if let buildIDStr = publicBranch["buildid"] as? String, let buildID = UInt32(buildIDStr) {
+                    info.buildID = buildID
+                } else if let buildID = publicBranch["buildid"] as? UInt32 {
+                    info.buildID = buildID
+                }
+            }
+        }
+
+        // UFS (cloud saves)
+        if let ufs = appInfo["ufs"] as? [String: Any] {
+            info.cloudSaveEnabled = true
+            if let savefiles = ufs["savefiles"] as? [String: Any] {
+                for (_, fileData) in savefiles {
+                    guard let file = fileData as? [String: Any] else { continue }
+                    var csf = CloudSaveFile()
+                    csf.root = file["root"] as? String ?? ""
+                    csf.path = file["path"] as? String ?? ""
+                    csf.pattern = file["pattern"] as? String ?? ""
+                    csf.recursive = (file["recursive"] as? String) == "1"
+                    info.cloudSaveFiles.append(csf)
+                }
+            }
+        }
+
+        // Filter out non-game types unless explicitly wanted
+        guard !info.name.isEmpty else { return nil }
+
+        return info
+    }
+}
+
+/// Madeira ml1420: which owned apps one library fetch left out, and why.
+/// App IDs and short reason tokens only.
+struct SteamLibraryVisibilityReport {
+    /// Valve's non-playable app types; counted, not listed one by one.
+    static let expectedTypes: Set<String> = ["type-dlc", "type-music", "type-tool", "type-config", "type-video",
+                                             "type-series", "type-episode", "type-media", "type-beta", "type-hardware",
+                                             "type-advertising", "type-guide", "type-comic", "type-driver", "type-plugin",
+                                             "type-franchise"]
+    private(set) var requested = 0
+    /// Hidden app → reason: parse-*, unknown (PICS does not know it), missing
+    /// (absent from every response), or `SteamAppInfo.hiddenReason`. "+token"
+    /// marks apps PICS flagged as sent without a valid access token.
+    private(set) var reasons: [UInt32: String] = [:]
+
+    init(requested: [UInt32], parsed: [SteamAppInfo], unknown: Set<UInt32>, failed: [UInt32: String], missingToken: Set<UInt32>) {
+        let ids = Set(requested)
+        self.requested = ids.count
+        var infos: [UInt32: SteamAppInfo] = [:]
+        for info in parsed { infos[info.appID] = info }
+        for id in ids {
+            let reason: String?
+            if let info = infos[id] { reason = info.hiddenReason }
+            else if let failure = failed[id] { reason = failure }
+            else if unknown.contains(id) { reason = "unknown" }
+            else { reason = "missing" }
+            if let reason { reasons[id] = reason + (missingToken.contains(id) ? "+token" : "") }
+        }
+    }
+
+    /// "requested=… hidden=… types=dlc:12,… ids=7001:nodepot/os2,… more=…"
+    func summary(limit: Int = 40) -> String {
+        var types: [String: Int] = [:]
+        var listed: [(UInt32, String)] = []
+        for (id, reason) in reasons {
+            let base = reason.hasSuffix("+token") ? String(reason.dropLast(6)) : reason
+            if Self.expectedTypes.contains(base) { types[String(base.dropFirst(5)), default: 0] += 1 }
+            else { listed.append((id, reason)) }
+        }
+        listed.sort { $0.0 < $1.0 }
+        let typeText = types.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }.prefix(16)
+            .map { "\($0.key):\($0.value)" }.joined(separator: ",")
+        let idText = listed.prefix(limit).map { "\($0.0):\($0.1)" }.joined(separator: ",")
+        return "requested=\(requested) hidden=\(reasons.count) types=\(typeText.isEmpty ? "-" : typeText) " +
+               "ids=\(idText.isEmpty ? "-" : idText) more=\(max(0, listed.count - limit))"
+    }
+}

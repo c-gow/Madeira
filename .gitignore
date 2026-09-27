@@ -86,6 +86,26 @@ app/Madeira/aarch64-windows/winedevice.exe
 # Toolchains (pulled by build scripts)
 toolchains/
 
+# Local Windows/WSL xtool setup, generated SwiftPM project and build logs
+/.xtool/
+/xtool/
+/xtool.yml
+/xtool.yaml
+/Package.swift
+/Package.resolved
+/.build/
+/.swiftpm/
+/AGENTS.md
+/CLAUDE.md
+
+# Madeira Dock implementation belongs only to its separate private repository.
+# The app may track dockhost.exe and the public launch adapter, never host source.
+/build/steam-host/
+/madeira-dock/
+/private/
+/docs/STEAM_HOST_PLAN.md
+/build/host-tests/__pycache__/
+
 # Xcode
 *.xcuserdata
 *.xcworkspace
