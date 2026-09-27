@@ -15,7 +15,8 @@
 # sha256 592272df3cf01e85e7db300c449df5061092574d099da275d19e97ef0510f8a6),
 # with build/mesa-ios/patches/*.patch applied. The patches modify Mesa and
 # are offered under Mesa's licence (MIT), so they can go upstream as they are.
-# Python deps (meson, mako, pyyaml) come from research/mesa-venv.
+# Python deps (meson, mako, pyyaml, ninja) come from research/mesa-venv; bison
+# and flex are the ones that ship with macOS.
 set -eu
 R="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HERE="$R/build/mesa-ios"
@@ -26,7 +27,22 @@ B="$HERE/obj"
 OUT="$R/app/Madeira/gl"
 SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
 
-export PATH="$VENV/bin:/opt/homebrew/opt/bison/bin:$PATH"
+if [ ! -f "$SRC/meson.build" ]; then
+    echo "Mesa source not found at $SRC" >&2
+    echo "  curl -LO https://archive.mesa3d.org/mesa-25.0.7.tar.xz && tar -xf mesa-25.0.7.tar.xz -C \"$(dirname "$SRC")\"" >&2
+    exit 1
+fi
+if [ ! -x "$VENV/bin/meson" ] || [ ! -x "$VENV/bin/ninja" ]; then
+    echo "Python build tools not found at $VENV" >&2
+    echo "  python3 -m venv \"$VENV\" && \"$VENV/bin/pip\" install meson mako pyyaml packaging ninja" >&2
+    exit 1
+fi
+if [ ! -d "$MVK" ]; then
+    echo "MoltenVK not found at $MVK; run build/moltenvk-ios/build.sh first" >&2
+    exit 1
+fi
+
+export PATH="$VENV/bin:$PATH"
 
 # Patches are applied once; the marker keeps re-runs idempotent.
 for p in "$HERE"/patches/*.patch; do
