@@ -33,12 +33,57 @@
 #import <OpenGLES/ES3/glext.h>
 #import <QuartzCore/CAMetalLayer.h>
 
+#include <pthread.h>
+
 #include "../IOSDisplayShim.h"
 
 #define GL_RING 3
 
 // stderr is what the app's log view captures (see Winios.m).
 #define GLLOG(fmt, ...) do { fprintf(stderr, "[winios-gl] " fmt "\n", ##__VA_ARGS__); fflush(stderr); } while (0)
+
+// ---- background gate -----------------------------------------------------
+//
+// iOS refuses GPU work from an app that is not active: MoltenVK loses the
+// VkDevice ("Insufficient Permission (to submit GPU work from background)")
+// and the GL context never draws again; EAGL kills the app outright. The app
+// keeps running in the background (its audio session), so the game keeps
+// rendering. Each present waits here while the app is inactive; it starts
+// waiting at WillResignActive, a little before the GPU is actually denied.
+// Notifications are observed without touching UIKit state.
+
+static pthread_mutex_t gl_gate_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t gl_gate_cond = PTHREAD_COND_INITIALIZER;
+static BOOL gl_gate_inactive;
+
+static void gl_gate_set(BOOL inactive) {
+    pthread_mutex_lock(&gl_gate_lock);
+    gl_gate_inactive = inactive;
+    pthread_cond_broadcast(&gl_gate_cond);
+    pthread_mutex_unlock(&gl_gate_lock);
+}
+
+static void gl_gate_init(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+        [nc addObserverForName:@"UIApplicationWillResignActiveNotification" object:nil queue:nil
+                    usingBlock:^(NSNotification *n) { gl_gate_set(YES); }];
+        [nc addObserverForName:@"UIApplicationDidBecomeActiveNotification" object:nil queue:nil
+                    usingBlock:^(NSNotification *n) { gl_gate_set(NO); }];
+    });
+}
+
+void madeira_gl_wait_active(void) {
+    gl_gate_init();
+    pthread_mutex_lock(&gl_gate_lock);
+    if (gl_gate_inactive) {
+        GLLOG("app inactive: holding GL presents until it is active again");
+        while (gl_gate_inactive) pthread_cond_wait(&gl_gate_cond, &gl_gate_lock);
+        GLLOG("app active: GL presents resumed");
+    }
+    pthread_mutex_unlock(&gl_gate_lock);
+}
 
 // ---- contexts ------------------------------------------------------------
 
