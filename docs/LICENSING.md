@@ -28,7 +28,7 @@ plugins):
 | Apple system frameworks (Metal, Foundation, UIKit, ...) | Apple OS components | GPL-3 "System Library" |
 | `gl/libOSMesa.dylib`: Mesa 25.0.7 OSMesa + Zink + softpipe (desktop OpenGL backend) | MIT and other permissive licences (`licenses/Mesa-license.rst`) | built by `build/mesa-ios/build.sh`; Madeira's patches to Mesa (`build/mesa-ios/patches`) are offered under MIT |
 | `gl/libMoltenVK.dylib`: MoltenVK 1.4.2, containing SPIRV-Cross, SPIRV-Tools, cereal | Apache-2.0 (cereal BSD-3-Clause); texts in `licenses/` | built by `build/moltenvk-ios/build.sh`, unmodified; Apache-2.0 is compatible with GPL-3.0 |
-| PE DLLs in `arm64ec-windows/` (Wine builtins, FEX `libarm64ecfex.dll`, `d3d12.dll`, `winemetal.dll`) | as their sources above | separate files in the bundle; `opengl32.dll` and `xtajit64.dll` are built with `patches/wine-opengl-winios.patch` and `patches/fex-arm64ec-arena-notify.patch` applied |
+| PE DLLs in `arm64ec-windows/` (Wine builtins, FEX `libarm64ecfex.dll`, `d3d12.dll`, `winemetal.dll`) | as their sources above | separate files in the bundle; `opengl32.dll` is built with `patches/wine-opengl-winios.patch` applied |
 | `compat/love/lua51.dll`: LuaJIT 2.1 (x86-64 PE) | MIT (`licenses/LuaJIT-MIT.txt`) | unmodified, built by `build/luajit-x64/build.sh`; copied into LOVE game folders at launch |
 
 ## Obligations that follow
