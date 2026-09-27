@@ -131,6 +131,23 @@ void winios_drv_post_key(unsigned short vk, unsigned int flags)
      * instead: without E0, "up arrow" is numpad 8. */
     scan = NtUserMapVirtualKeyEx( vk, MAPVK_VK_TO_VSC_EX, NtUserGetKeyboardLayout(0) );
     if (scan & 0xe000) flags |= KEYEVENTF_EXTENDEDKEY;
+    /* Wine's MAPVK_VK_TO_VSC_EX returns the FIRST scan code that maps to the
+     * VK, and the US layout maps the numpad's 0x48 to VK_UP (numlock off)
+     * before the real E0 48 arrow. So up arrow came back as plain 0x48 with
+     * no E0 prefix, and SDL2 (which reads the scan code, not wParam) saw
+     * numpad 8. SuperTuxKart's menus worked by touch, but its arrow-key
+     * driving did nothing. Force the extended bit for the keys that only
+     * exist on the E0 side of a real keyboard. */
+    switch (vk)
+    {
+    case VK_UP: case VK_DOWN: case VK_LEFT: case VK_RIGHT:
+    case VK_INSERT: case VK_DELETE: case VK_HOME: case VK_END:
+    case VK_PRIOR: case VK_NEXT:
+    case VK_RCONTROL: case VK_RMENU: case VK_LWIN: case VK_RWIN: case VK_APPS:
+    case VK_DIVIDE:
+        flags |= KEYEVENTF_EXTENDEDKEY;
+        break;
+    }
 
     input.type           = INPUT_KEYBOARD;
     input.ki.wVk         = vk;
