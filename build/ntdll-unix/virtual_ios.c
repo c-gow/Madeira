@@ -9339,6 +9339,7 @@ static int ios_wow_guard_borrowed_from( ULONG_PTR addr )
  */
 /* ml1570: on a small map, how many placeholders session start takes (0 = the normal band's rule). */
 static unsigned ios_wow_small_va_slots;
+extern unsigned long long ios_layerkit_lo, ios_layerkit_hi;   /* ml900: measured in ios_va_profile() */
 static void ios_wow_band( ULONG_PTR *floor, ULONG_PTR *ceil )
 {
     static ULONG_PTR kern_max;      /* 0 = not asked yet, 1 = unavailable */
@@ -9395,6 +9396,36 @@ static void ios_wow_band( ULONG_PTR *floor, ULONG_PTR *ceil )
         {
             *floor = lo;
             *ceil  = hi;
+        }
+        else
+        {
+            /* A SMALLER MAP STILL. A tablet reported max_address = 0x458000000
+             * (17.4 GB): top - 8 GB is below 16 GB, the band above was empty, the
+             * candidates stayed in the unreachable high band and a 32-bit main
+             * image was terminated with c0000017. Its launch probe showed the
+             * 4 GB slots at 4, 8 and 12 GB free; 4 GB holds the JIT pool and the
+             * executable window, and CoreAnimation's measured range
+             * (ios_layerkit_lo/hi, [layerkit-range]) took 12 GB up. So on such a
+             * map the band starts at 8 GB, runs to the end of the map, and is cut
+             * at the CoreAnimation range -- keeping whichever side can hold a
+             * window. The guard page may borrow the first page of that range. */
+            ULONG_PTR slo = (ULONG_PTR)0x200000000ULL;                  /* 8 GB */
+            ULONG_PTR shi = kern_max;
+
+            if (ios_layerkit_hi && ios_layerkit_lo < shi && ios_layerkit_hi > slo)
+            {
+                ULONG_PTR below_hi = ios_layerkit_lo > slo ? ios_layerkit_lo : slo;
+                ULONG_PTR above_lo = ((ULONG_PTR)ios_layerkit_hi + IOS_WOW_WINDOW_SIZE - 1) &
+                                     ~(IOS_WOW_WINDOW_SIZE - 1);
+
+                if (below_hi >= slo + IOS_WOW_WINDOW_SIZE) shi = below_hi;
+                else slo = above_lo;
+            }
+            if (shi >= slo + IOS_WOW_WINDOW_SIZE)
+            {
+                *floor = slo;
+                *ceil  = shi;
+            }
         }
         if (!announced)
         {
@@ -10569,6 +10600,7 @@ extern const void *dwrite_unix_call_funcs[];
 /* opengl32's unix side, compiled from wine/dlls/opengl32/unix_{wgl,thunks}.c
  * into libntdll_unix.a (build/ntdll-unix/build.sh). */
 extern const void *opengl32_unix_call_funcs[];
+extern const void *opengl32_unix_call_wow64_funcs[];
 
 /* MADEIRA 2026-09-19: winegstreamer's unix side, which upstream implements
  * with GStreamer (dlls/winegstreamer/wg_transform.c) and this port implements
@@ -10938,8 +10970,10 @@ static NTSTATUS load_builtin_unixlib( void *module, BOOL wow, const void **funcs
             funcs64 = funcs_wow64 = (const void *)ios_stub_unix_call_table;
         } else if (match && strstr(match, "opengl32")) {
             /* Real opengl32 unix side (OpenGL ES / desktop GL through the winios
-             * WGL driver) for 64-bit callers. MADEIRA_NO_GL=1 keeps the old
-             * GL-absent stub table; 32-bit callers keep it too. */
+             * WGL driver). MADEIRA_NO_GL=1 keeps the old GL-absent stub table.
+             * The wow64 table's thunks convert every embedded guest pointer with
+             * ios_wow_host_ptr() (patches/wine-opengl-winios.patch: make_opengl),
+             * so 32-bit GL games (Quake 3 engine, GLQuake) reach the driver. */
             pthread_once( &ios_stub_tables_once, ios_init_stub_tables );
             if (getenv("MADEIRA_NO_GL")) {
                 WARN_(module)("iOS: module %p (%s) -> GL-absent stub table (MADEIRA_NO_GL)\n",
@@ -10950,7 +10984,8 @@ static NTSTATUS load_builtin_unixlib( void *module, BOOL wow, const void **funcs
                 libname = "opengl32 (winios WGL)";
                 funcs64 = (const void *)opengl32_unix_call_funcs;
             }
-            funcs_wow64 = (const void *)ios_gl_stub_unix_call_table;
+            funcs_wow64 = getenv("MADEIRA_NO_GL") ? (const void *)ios_gl_stub_unix_call_table
+                                                  : (const void *)opengl32_unix_call_wow64_funcs;
         } else {
             pthread_once( &ios_stub_tables_once, ios_init_stub_tables );
             WARN_(module)("iOS: no unix .so for module %p (unix_path=%s, modname=%s, mapped=%s), using stub table\n",

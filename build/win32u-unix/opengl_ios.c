@@ -55,6 +55,7 @@ extern void madeira_gl_context_release( void *context );
 extern int madeira_gl_make_current( void *context );
 extern int madeira_gl_present( void **state, void *hwnd, unsigned int fbo, int width, int height );
 extern void madeira_gl_present_release( void *state );
+extern void madeira_gl_wait_active( void );
 extern void *madeira_zink_target_bind( void **state, void *hwnd, int width, int height, int *row_pixels );
 extern void *madeira_zink_target_present( void **state, void *hwnd, int *row_pixels );
 extern void madeira_zink_target_release( void *state );
@@ -408,6 +409,7 @@ static BOOL surface_present( struct ios_surface *surface )
     HWND hwnd = surface->base.client ? surface->base.client->hwnd : 0;
 
     if (!hwnd || !surface->base.draw_fbo) return FALSE;
+    madeira_gl_wait_active();   /* no GPU work while the app is in the background */
     return madeira_gl_present( &surface->present_state, hwnd, surface->base.draw_fbo,
                                surface->width, surface->height );
 }
@@ -672,6 +674,7 @@ static BOOL zink_present( struct zink_surface *surface )
     int row = 0;
 
     if (!context || zink_current != surface) return FALSE;
+    madeira_gl_wait_active();   /* no GPU work while the app is in the background */
     pz_glFinish();   /* OSMesa copies the frame into the locked IOSurface */
     if (!(next = madeira_zink_target_present( &surface->target, drawable_hwnd( &surface->base ), &row )))
         return FALSE;
