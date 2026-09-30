@@ -1,11 +1,11 @@
 diff --git a/LICENSE-MADEIRA.md b/LICENSE-MADEIRA.md
-index 05ad09b2ce1..37f3a5a857c 100644
+index 643329484fc..ca3733f4b0a 100644
 --- a/LICENSE-MADEIRA.md
 +++ b/LICENSE-MADEIRA.md
-@@ -23,6 +23,19 @@ distributes under **LGPL-2.1-or-later**. This branch keeps that licence.
-   their authors, each signed off under the DCO (see `CONTRIBUTING.md`):
-   - `feb96ad2be4` xinput: read Madeira host controller snapshots through
-     win32u. Author: 125hz. Merged from pull request #1 on 2026-09-25.
+@@ -34,6 +34,19 @@ distributes under **LGPL-2.1-or-later**. This branch keeps that licence.
+   - `3ba35adcbdd` server iOS: queue a process-wide system APC on a live thread when
+     none can be signalled. Author: 125hz. Merged from pull request #13 on
+     2026-09-29.
 +  - opengl32: OpenGL ES contexts for Madeira's winios WGL driver
 +    (`dlls/opengl32/unix_wgl.c`), the fixed low image base limited to x86
 +    builds (`dlls/opengl32/Makefile.in`), and the `[park-5s]` stuck-wait
