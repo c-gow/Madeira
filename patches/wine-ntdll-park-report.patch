@@ -1,7 +1,7 @@
 From: Connor Gow <cmgow08@gmail.com>
 Subject: [PATCH] ntdll: [park-5s] report for thread-id alert waits stuck 5 seconds
 
-Applies to: the wine submodule (willfaust/wine madeira-lgpl) at 074e0e368b6, the pin of this commit
+Applies to: the wine submodule (willfaust/wine madeira-lgpl) at 4f5b19718f4, the pin of this commit
   git -C wine apply ../patches/wine-ntdll-park-report.patch
 Needs ios_syscall_frame_regs() from build/ntdll-unix/signal_arm64_ios.c.
 

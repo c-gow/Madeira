@@ -39,16 +39,26 @@ Removing an entry never removes the game's files or saves.
   **Steam** (the Steam games being downloaded and the games Steam has
   installed, with their count; a **Sign in to Steam** card when signed out),
   its **Not installed** group (the account's other games, with their count),
-  then **Other games** (the games you added, with **Add a game**). Tapping
+  then **Other games** (the games you added; **+** in the navigation bar adds one). Tapping
   **Steam** or **Other games** collapses it; **Not installed** folds on its
   own, open by default; each state is remembered. Search, the layout and, for
   installed games, Sort by apply to every section. Pull down to read the
   Steam install records and the account's library again. Without Madeira
   Dock the games you added are one grid.
+- Grid cards: a game that is not installed shows its artwork darkened, with a
+  download glyph on a soft circle of blur. Every grid card throws ambient
+  light on the page around it, like an LED strip behind a TV: its artwork's own
+  colours, with arcs of the ring brightening and falling into shadow and the
+  colours travelling around it as if a film were playing (fainter and less vivid
+  for a game that is not installed; held still with Reduce Motion). Pressing a
+  card shrinks its artwork, and its light draws in with crisp rays and goes out
+  behind it like a spotlight's aperture closing; on release the artwork springs
+  back and the light opens again slowly. The width a row of cards leaves goes
+  into the gaps between them, so each card's light keeps to its own space.
 - **Desktop** opens the Wine desktop (explorer and services in a virtual
   desktop) with its own profile; its Resolution is the desktop's size.
 - The build label (`MadeiraBuild` in Info.plist, else the bundle version) is
-  shown under the title and in the developer interface's status row.
+  shown in Settings (Ready to play) and in the developer interface's status row.
 - **Settings**: JIT and memory status, Enable JIT, extended logging, pointer
   mode (Absolute, Relative or Touch) and touch sensitivity, **Display** (hold
   the display at its maximum rate, off by default), **Memory & sync** (swap tier
@@ -237,6 +247,7 @@ menu owns input, the game sees a connected pad at rest.
 | `MADEIRA_FRONTEND_KEYBOARD` | on | Keyboard opens the game view's own keyboard instead of the key window |
 | `MADEIRA_ONBOARDING` | on | first-run setup never opens, and Settings › Steam has no **Run setup again** |
 | `MADEIRA_LIBRARY_COLLAPSE` | on | the **Steam** and **Other games** titles do not collapse (**Not installed** still folds) |
+| `MADEIRA_LIBRARY_AMBIENT` | on | no ambient light around the library's grid cards |
 
 Opt-in (`env.NAME = 1`), off by default:
 
@@ -251,22 +262,22 @@ Log tags: `[frontend]`, `[display]`, `[display-shape]`, `[frontend-pointer]`, `[
 
 ## Tests
 
-`build/host-tests/check-frontend.py` (profiles incl. resolution and scaling,
+`tests/host/check-frontend.py` (profiles incl. resolution and scaling,
 the engine switches a profile exports, the 30 FPS fallback, the display layout
 math, controller commands, the exit hook, and the presence of the details and
-in-game menu options), `build/host-tests/check-runtime-settings.py`
+in-game menu options), `tests/host/check-runtime-settings.py`
 (`MadeiraConfig.set` and the Settings defaults) and
-`build/host-tests/check-library-api.py` (renderer detection and the badge).
-`build/host-tests/check-onboarding.py` covers Steam setup: the pages with and
+`tests/host/check-library-api.py` (renderer detection and the badge).
+`tests/host/check-onboarding.py` covers Steam setup: the pages with and
 without Dock, the done key, the `MADEIRA_ONBOARDING` switch, and the wiring
 (no Wine session, no pool or engine switch, sign-in and Dock only through
 their public pieces).
-`build/host-tests/check-steam-games.py` covers the library's Steam section: Dock's
+`tests/host/check-steam-games.py` covers the library's Steam section: Dock's
 discovery on a synthetic drive_c laid out as Steam writes it, the merge of
 installed and owned games, the section, status, card pill, search, Play and
 artwork rules, the program an installed game's pills describe, the groups of the
 library's sections and their Sort by order, and that Play uses only Dock's launch
-path. `build/host-tests/check-library-sections.py` covers the library page's
+path. `tests/host/check-library-sections.py` covers the library page's
 sections (order, texts, collapsing, search, layout, pull to refresh).
-`build/host-tests/check-steam-library.py`
+`tests/host/check-steam-library.py`
 covers the owned library and downloads (`docs/STEAM_LIBRARY.md`).
