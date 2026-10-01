@@ -4305,14 +4305,14 @@ void ios_jit_sync_write(void *addr, size_t size)
 #define X18_ROLE_RT2  3  /* bits[14:10] = second register in LDP/STP */
 #define X18_ROLE_RT   4  /* bits[4:0] = the register being STORED (64-bit STR/STUR/STP) */
 
-static int ios_insn_x18_role(uint32_t insn)
+static int ios_insn_x18_role(uint32_t insn, int stores)
 {
     /* Quick reject: check if 18 appears in any relevant field */
     int rn = (insn >> 5) & 0x1f;
     int rm = (insn >> 16) & 0x1f;
     int rt2 = (insn >> 10) & 0x1f;
     int rt = insn & 0x1f;
-    if (rn != 18 && rm != 18 && rt2 != 18 && rt != 18) return X18_ROLE_NONE;
+    if (rn != 18 && rm != 18 && rt2 != 18 && !(stores && rt == 18)) return X18_ROLE_NONE;
 
     /* Classify instruction to verify the field is actually a register */
     uint32_t top8 = insn >> 24;
@@ -4381,8 +4381,9 @@ static int ios_insn_x18_role(uint32_t insn)
      * struct: 3,102 sites), and on iOS it stored a zeroed x18, so every GL call
      * reached the unix side with teb == NULL. Only the plain 64-bit store forms
      * are recognised: STR (unsigned offset), STUR, STP (signed offset). Loads
-     * INTO x18 are never patched. */
-    if (rt == 18 && rn != 18)
+     * INTO x18 are never patched. Only for images where ios_x18_patch_stores()
+     * is true (opengl32); every other image is patched exactly as before. */
+    if (stores && rt == 18 && rn != 18)
     {
         if ((insn & 0xFFC00000) == 0xF9000000) return X18_ROLE_RT;                /* STR  Xt, [Xn, #imm12*8] */
         if ((insn & 0xFFE00C00) == 0xF8000000) return X18_ROLE_RT;                /* STUR Xt, [Xn, #simm9] */
@@ -4486,7 +4487,17 @@ static unsigned char *ios_x18_build_data_map( const char *text, size_t text_size
  * 2.2MB reservation for ntdll) — with per-child copies of every DLL that
  * waste was ~HALF the pool (4 apps hit 368/384MB). Count the actual
  * patch sites and size the reservation to fit. */
-size_t ios_jit_x18_tramp_need( const char *text, size_t text_size )
+/* Madeira: which images also get their x18 STORES patched (X18_ROLE_RT).
+ * Only opengl32, whose generated thunks store NtCurrentTeb() into every
+ * params struct. Another generated-thunk DLL that passes the TEB the same way
+ * would need adding here. `image` is the readable mapped PE. */
+int ios_x18_patch_stores( const void *image, size_t image_size )
+{
+    extern const char *ios_pe_module_name( const void *image_base, size_t image_size );
+    return !strcasecmp( ios_pe_module_name( image, image_size ), "opengl32.dll" );
+}
+
+size_t ios_jit_x18_tramp_need( const char *text, size_t text_size, int stores )
 {
     unsigned char *data_map = ios_x18_build_data_map( text, text_size );
     size_t need = 0;
@@ -4494,7 +4505,7 @@ size_t ios_jit_x18_tramp_need( const char *text, size_t text_size )
     {
         uint32_t insn = *(const uint32_t *)(text + i);
         if (data_map && (data_map[(i / 4) >> 3] & (1 << ((i / 4) & 7)))) continue;
-        if (ios_insn_x18_role( insn ) != X18_ROLE_NONE) need += 32;
+        if (ios_insn_x18_role( insn, stores ) != X18_ROLE_NONE) need += 32;
     }
     free( data_map );
     /* Slack: the patcher's per-site max is 32B; pad one page so a
@@ -4504,7 +4515,7 @@ size_t ios_jit_x18_tramp_need( const char *text, size_t text_size )
 }
 
 int ios_jit_patch_x18(char *text_rw, char *text_rx, size_t text_size,
-                       char *tramp_rw, char *tramp_rx, size_t tramp_size)
+                       char *tramp_rw, char *tramp_rx, size_t tramp_size, int stores)
 {
     size_t tramp_off = 0;
     int count = 0;
@@ -4660,10 +4671,10 @@ int ios_jit_patch_x18(char *text_rw, char *text_rx, size_t text_size,
         int role;
         if (data_map && (data_map[(i / 4) >> 3] & (1 << ((i / 4) & 7))))
         {
-            if (ios_insn_x18_role(insn) != X18_ROLE_NONE) lit_skipped++;
+            if (ios_insn_x18_role(insn, stores) != X18_ROLE_NONE) lit_skipped++;
             continue;
         }
-        role = ios_insn_x18_role(insn);
+        role = ios_insn_x18_role(insn, stores);
         if (role == X18_ROLE_NONE) continue;
 
         /* Determine scratch register — use x17 normally.
@@ -10958,7 +10969,8 @@ const char *ios_pe_module_name( const void *image_base, size_t image_size )
  * the patch stage; scanning x64 bytes would count garbage matches). */
 static size_t ios_x18_tramp_prealloc_scan( const char *image, size_t image_size )
 {
-    extern size_t ios_jit_x18_tramp_need( const char *text, size_t text_size );
+    extern size_t ios_jit_x18_tramp_need( const char *text, size_t text_size, int stores );
+    extern int ios_x18_patch_stores( const void *image, size_t image_size );
     const size_t pg = 0x4000;
     unsigned int pe_off;
     unsigned short machine, num_sec, opt_sz;
@@ -10987,7 +10999,7 @@ static size_t ios_x18_tramp_prealloc_scan( const char *image, size_t image_size 
     }
     if (machine != IMAGE_FILE_MACHINE_ARM64 && !is_arm64ec) return 0;
     if (!text_sz || text_off + text_sz > image_size) return 0;
-    return (ios_jit_x18_tramp_need(image + text_off, text_sz) + pg - 1) & ~(pg - 1);
+    return (ios_jit_x18_tramp_need(image + text_off, text_sz, ios_x18_patch_stores(image, image_size)) + pg - 1) & ~(pg - 1);
 }
 
 
@@ -12722,8 +12734,10 @@ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
                     if (text_sz > 0)
                     {
                         /* Task #25: exact budget (was 100% of .text, ~99% wasted). */
-                        extern size_t ios_jit_x18_tramp_need( const char *text, size_t text_size );
-                        size_t tramp_budget = ios_jit_x18_tramp_need((char *)jit_rw_base + offset + text_off, text_sz);
+                        extern size_t ios_jit_x18_tramp_need( const char *text, size_t text_size, int stores );
+                        extern int ios_x18_patch_stores( const void *image, size_t image_size );
+                        int x18_stores = ios_x18_patch_stores(image_base, image_size);
+                        size_t tramp_budget = ios_jit_x18_tramp_need((char *)jit_rw_base + offset + text_off, text_sz, x18_stores);
                         size_t tramp_alloc = (tramp_budget + page_size - 1) & ~(page_size - 1);
                         /* task #34: fixed image-relative offset — the region
                          * pre-reserved in this image's own allocation. The
@@ -12749,7 +12763,7 @@ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
                             char *text_rx = (char *)jit_rx_base + offset + text_off;
 
                             int patched = ios_jit_patch_x18(text_rw, text_rx, text_sz,
-                                                            tramp_rw, tramp_rx, tramp_alloc);
+                                                            tramp_rw, tramp_rx, tramp_alloc, x18_stores);
 
                             if (patched > 0)
                             {
@@ -12984,9 +12998,11 @@ int ios_jit_copy_module_for_child(void *module_addr, void *child_peb)
      * mprotect_exec copy pipeline). Budget from the SOURCE bytes; identical
      * to what the post-memcpy scan would compute. */
     {
-        extern size_t ios_jit_x18_tramp_need( const char *text, size_t text_size );
+        extern size_t ios_jit_x18_tramp_need( const char *text, size_t text_size, int stores );
+        extern int ios_x18_patch_stores( const void *image, size_t image_size );
         child_tramp_prealloc = m->text_size
-            ? ((ios_jit_x18_tramp_need((const char *)m->pe_base + m->text_offset, m->text_size) + pg - 1) & ~(pg - 1))
+            ? ((ios_jit_x18_tramp_need((const char *)m->pe_base + m->text_offset, m->text_size,
+                                       ios_x18_patch_stores(m->pe_base, m->size)) + pg - 1) & ~(pg - 1))
             : 0;
     }
     alloc_size += child_tramp_prealloc;
@@ -13116,7 +13132,8 @@ int ios_jit_copy_module_for_child(void *module_addr, void *child_peb)
         int patched = ios_jit_patch_x18(
             rw_dest + m->text_offset, rx_dest + m->text_offset, m->text_size,
             (char *)ios_jit_rw_base_global + tramp_off,
-            (char *)ios_jit_rx_base_global + tramp_off, child_tramp_prealloc);
+            (char *)ios_jit_rx_base_global + tramp_off, child_tramp_prealloc,
+            ios_x18_patch_stores(m->pe_base, m->size));
         sys_icache_invalidate((char *)ios_jit_rx_base_global + tramp_off, child_tramp_prealloc);
         dprintf(2, "[child-ntdll] x18-patched %d instructions (tramps at image-relative +0x%lx)\n",
                 patched, (unsigned long)(alloc_size - child_tramp_prealloc));
