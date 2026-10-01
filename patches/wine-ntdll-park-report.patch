@@ -16,10 +16,18 @@ Written with AI assistance (Claude); not for submission to WineHQ.
 Signed-off-by: Connor Gow <cmgow08@gmail.com>
 ---
 diff --git a/dlls/ntdll/unix/sync.c b/dlls/ntdll/unix/sync.c
-index 9c9be7beca4..9caebb737eb 100644
+index 4d0fd0e16cf..a10fde3d587 100644
 --- a/dlls/ntdll/unix/sync.c
 +++ b/dlls/ntdll/unix/sync.c
-@@ -3901,8 +3901,75 @@ static struct
+@@ -57,6 +57,7 @@
+ #include <time.h>
+ #ifdef __APPLE__
+ # include <mach/mach_time.h>
++# include <mach/mach.h>   /* vm_read_overwrite for the [park-5s] report */
+ #endif
+ #ifdef HAVE_KQUEUE
+ # include <sys/event.h>
+@@ -4919,8 +4920,80 @@ static struct
      const void *addr;   /* wait-on-address cookie; NULL = not currently parked */
      ULONGLONG since;    /* NtQuerySystemTime at park entry */
      int inf;            /* 1 = INFINITE wait */
@@ -29,14 +37,20 @@ index 9c9be7beca4..9caebb737eb 100644
  
 +extern void ios_syscall_frame_regs( ULONG_PTR *pc, ULONG_PTR *lr, ULONG_PTR *fp, ULONG_PTR *sp );
 +
-+/* Is [addr, addr+len) mapped? msync() fails with ENOMEM on unmapped pages and
-+ * never faults, which is what a report about an arbitrary thread needs. */
-+static int ios_range_mapped( ULONG_PTR addr, size_t len )
++/* Copy [addr, addr+len) without faulting: a report about an arbitrary
++ * thread's stack must survive guard pages. msync() is not enough -- it
++ * succeeds on a mapped PROT_NONE page, and reading that page crashed the
++ * app (ios_alert_waiter_dump on a stack guard). vm_read_overwrite checks
++ * read permission and returns an error instead. */
++static int ios_safe_read( ULONG_PTR addr, void *out, size_t len )
 +{
-+    ULONG_PTR page = addr & ~0x3fffULL, end = addr + len;
-+    for (; page < end; page += 0x4000)
-+        if (msync( (void *)page, 0x4000, MS_ASYNC )) return 0;
-+    return 1;
++#ifdef __APPLE__
++    vm_size_t got = 0;
++    return vm_read_overwrite( mach_task_self(), (vm_address_t)addr, len, (vm_address_t)out, &got ) ==
++           KERN_SUCCESS && got == len;
++#else
++    return 0;
++#endif
 +}
 +
 +/* Plausible code address: JIT pool copies (0x14xxxxxxx-0x1ffffffff) or PE
@@ -59,7 +73,7 @@ index 9c9be7beca4..9caebb737eb 100644
 +    int n, k, found;
 +
 +    if (InterlockedIncrement( &reports ) > 24) return;
-+    if (a > 0x10000 && ios_range_mapped( a & ~7ULL, 8 )) val = *(volatile unsigned long long *)(a & ~7ULL);
++    if (a <= 0x10000 || !ios_safe_read( a & ~7ULL, &val, 8 )) val = 0;
 +    dprintf( 2, "[park-5s] tid=%04x addr=%p val@addr&~7=%016llx age=%ds inf=%d pc=%p lr=%p fp=%p sp=%p\n",
 +             (unsigned int)(ULONG_PTR)ios_alert_waiters[i].tid & 0xffff, (void *)a, val, age_s,
 +             ios_alert_waiters[i].inf, (void *)ios_alert_waiters[i].pe_pc, (void *)ios_alert_waiters[i].pe_lr,
@@ -69,9 +83,10 @@ index 9c9be7beca4..9caebb737eb 100644
 +    n = snprintf( buf, sizeof(buf), "[park-5s]   fp-chain:" );
 +    for (fp = ios_alert_waiters[i].pe_fp, k = 0; fp && k < 24 && n < (int)sizeof(buf) - 24; k++)
 +    {
-+        if ((fp & 7) || !ios_range_mapped( fp, 16 )) break;
-+        n += snprintf( buf + n, sizeof(buf) - n, " %llx", ((unsigned long long *)fp)[1] );
-+        v = ((ULONG_PTR *)fp)[0];
++        ULONG_PTR rec[2];   /* {prev fp, lr} */
++        if ((fp & 7) || !ios_safe_read( fp, rec, sizeof(rec) )) break;
++        n += snprintf( buf + n, sizeof(buf) - n, " %llx", (unsigned long long)rec[1] );
++        v = rec[0];
 +        if (v <= fp) break;
 +        fp = v;
 +    }
@@ -82,9 +97,7 @@ index 9c9be7beca4..9caebb737eb 100644
 +    sp = ios_alert_waiters[i].pe_sp;
 +    for (k = 0, found = 0; sp && k < 256 && found < 32 && n < (int)sizeof(buf) - 24; k++)
 +    {
-+        ULONG_PTR slot = sp + k * 8;
-+        if (!(slot & 0x3fff) || k == 0) { if (!ios_range_mapped( slot, 8 )) break; }
-+        v = *(ULONG_PTR *)slot;
++        if (!ios_safe_read( sp + k * 8, &v, sizeof(v) )) break;
 +        if (!ios_looks_like_code( v )) continue;
 +        n += snprintf( buf + n, sizeof(buf) - n, " +%x:%llx", k * 8, (unsigned long long)v );
 +        found++;
@@ -95,7 +108,7 @@ index 9c9be7beca4..9caebb737eb 100644
  static int ios_alert_waiter_slot( void *tid )
  {
      int i, free_i;
-@@ -3951,9 +4018,13 @@ void ios_alert_waiter_dump(void)
+@@ -4969,9 +5042,13 @@ void ios_alert_waiter_dump(void)
      NtQuerySystemTime( &now );
      for (i = 0; i < IOS_ALERT_WAITER_MAX; i++)
      {
@@ -110,7 +123,7 @@ index 9c9be7beca4..9caebb737eb 100644
      }
      dprintf( 2, "[waiters] parked=%d over60s=%d rev=ml444\n", parked, over );
  
-@@ -4276,6 +4347,9 @@ NTSTATUS WINAPI NtWaitForAlertByThreadId( const void *address, const LARGE_INTEG
+@@ -5294,6 +5371,9 @@ NTSTATUS WINAPI NtWaitForAlertByThreadId( const void *address, const LARGE_INTEG
              NtQuerySystemTime( &ios_wnow );
              ios_alert_waiters[ios_wslot].since = ios_wnow.QuadPart;
              ios_alert_waiters[ios_wslot].inf = !timeout;
