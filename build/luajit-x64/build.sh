@@ -6,8 +6,9 @@
 # Why this exists: LOVE games (Balatro, ...) ship LuaJIT built in the old
 # 32-bit-GC-pointer mode, which requires every GC object to live below 2 GB.
 # iOS cannot map anything down there, so luaL_newstate() returns NULL and
-# love.exe crashes on its first Lua call. The app swaps this build in for the
-# game's own lua51.dll at launch (see LoveCompat in ContentView.swift).
+# love.exe crashes on its first Lua call. The wineserver maps this build in
+# place of such a lua51.dll when it is loaded, leaving the game's file alone
+# (build/wineserver/luajit_compat.c).
 #
 # Build options, all deliberate:
 #   GC64 (the v2.1 default on x64)  64-bit GC references: no low-2GB heap.
