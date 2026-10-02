@@ -6563,6 +6563,33 @@ static void ios_exe_win_init( void )
              (unsigned long long)(ios_exe_win_base + ios_exe_win_size) );
 }
 
+/* The image map_image_view is placing right now has its relocations stripped
+ * (IMAGE_FILE_RELOCS_STRIPPED): it runs at its ImageBase or not at all.  Set
+ * and cleared by map_image_view around its preferred-base attempt, under
+ * virtual_mutex.
+ *
+ * The 64 MB floor below assumes that a small image at the default ImageBase is
+ * relocatable, so it keeps the window for a later large fixed-base image.  A
+ * small image with stripped relocations is refused by that floor, placed
+ * elsewhere, and the loader then fails it with STATUS_CONFLICTING_ADDRESSES
+ * ("failed to create main module ... c0000018"): the program can never start.
+ * Such an image now gets the window whatever its size. */
+static int ios_exe_win_stripped_request;
+
+static int ios_exe_win_small_fixed(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+    {
+        /* 0 keeps the executable window from a fixed-base (relocations stripped) image smaller
+         * than 64 MB, as before; such a program then fails to start. */
+        const char *e = getenv( "MADEIRA_EXE_WINDOW_SMALL_FIXED" );
+        enabled = !(e && e[0] == '0');
+    }
+    return enabled;
+}
+
 /* Returns 1 if the reservation was released for this request. */
 static int ios_exe_win_claim( const void *addr, size_t size )
 {
@@ -6573,7 +6600,16 @@ static int ios_exe_win_claim( const void *addr, size_t size )
      * a released window still has to answer a matching request. */
     if (!ios_exe_win_base) return 0;
     if (a < ios_exe_win_base || a + size > ios_exe_win_base + ios_exe_win_size) return 0;
-    if (size < 64u * 1024u * 1024u)
+    if (size < 64u * 1024u * 1024u && ios_exe_win_stripped_request && ios_exe_win_small_fixed())
+    {
+        static int fixed_n;
+        if (fixed_n++ < 8)
+            dprintf( 2, "[exe-window] %p+%#lx is under the 64MB floor but its relocations are "
+                     "stripped: it can only run at this base, so it gets the window "
+                     "(MADEIRA_EXE_WINDOW_SMALL_FIXED=0 refuses it as before)\n",
+                     addr, (unsigned long)size );
+    }
+    else if (size < 64u * 1024u * 1024u)
     {
         static int small_n;
         if (small_n++ < 8)
@@ -15907,6 +15943,33 @@ static IMAGE_BASE_RELOCATION *process_relocation_block( char *page, IMAGE_BASE_R
 }
 
 
+/* A shared writable image section that is not aligned to the host page is mapped private.
+ *
+ * A section marked IMAGE_SCN_MEM_SHARED | IMAGE_SCN_MEM_WRITE is file-mapped
+ * MAP_SHARED from the server's shared-section file, so every process that maps
+ * the image sees the same bytes.  mmap works in host pages (16 KB here) and PE
+ * sections are aligned to 4 KB: a shared section that does not start and end on
+ * a host page cannot be file-mapped without replacing its neighbours' bytes, so
+ * map_file_into_view refuses it ("unaligned shared mapping"), the image load
+ * failed with STATUS_INVALID_IMAGE_FORMAT and the program never started.  Such
+ * a section is now loaded like any other writable section, from the image file:
+ * its contents are right, but writes are not seen by other processes that map
+ * the same image.  One log line names each section this happens to.
+ */
+static int ios_shared_section_private(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+    {
+        /* 0 fails the load of an image whose shared writable section is not aligned to the
+         * host page, as before; otherwise that section is mapped private. */
+        const char *e = getenv( "MADEIRA_SHARED_SECTION_PRIVATE" );
+        enabled = !(e && e[0] == '0');
+    }
+    return enabled;
+}
+
 /***********************************************************************
  *           map_image_into_view
  *
@@ -16065,10 +16128,27 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
                             debugstr_us(nt_name), sec[i].Name, ptr + sec[i].VirtualAddress,
                             sec[i].PointerToRawData, (int)pos, file_size, map_size,
                             sec[i].Characteristics );
-            if (map_file_into_view( view, shared_fd, sec[i].VirtualAddress, map_size, pos,
-                                    VPROT_COMMITTED | VPROT_READ | VPROT_WRITE, FALSE ) != STATUS_SUCCESS)
+            NTSTATUS shared_status = map_file_into_view( view, shared_fd, sec[i].VirtualAddress, map_size, pos,
+                                                         VPROT_COMMITTED | VPROT_READ | VPROT_WRITE, FALSE );
+
+            if (shared_status == STATUS_INVALID_PARAMETER && ios_shared_section_private())
+            {
+                /* not host-page aligned: see ios_shared_section_private */
+                dprintf( 2, "[shared-section] %s section %.8s rva=0x%x size=0x%lx is not aligned to the "
+                            "0x%lx-byte host page: mapped private, its writes are not shared between "
+                            "processes (MADEIRA_SHARED_SECTION_PRIVATE=0 fails the load instead)\n",
+                         debugstr_us(nt_name), sec[i].Name, (unsigned)sec[i].VirtualAddress,
+                         (unsigned long)map_size, (unsigned long)host_page_size );
+                pos += map_size;
+                goto private_section;
+            }
+            if (shared_status != STATUS_SUCCESS)
             {
                 ERR_(module)( "Could not map %s shared section %.8s\n", debugstr_us(nt_name), sec[i].Name );
+                dprintf( 2, "[shared-section] %s section %.8s rva=0x%x size=0x%lx: shared mapping failed, "
+                            "status=0x%x shared_fd=%d\n", debugstr_us(nt_name), sec[i].Name,
+                         (unsigned)sec[i].VirtualAddress, (unsigned long)map_size,
+                         (unsigned)shared_status, shared_fd );
                 do { IOS_IMG_FAIL(8); goto done; } while (0);
             }
 
@@ -16088,6 +16168,7 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
             continue;
         }
 
+    private_section:
         TRACE_(module)( "mapping %s section %.8s at %p off %x size %x virt %x flags %x\n",
                         debugstr_us(nt_name), sec[i].Name, ptr + sec[i].VirtualAddress,
                         sec[i].PointerToRawData, sec[i].SizeOfRawData,
@@ -16475,7 +16556,10 @@ static NTSTATUS map_image_view( struct file_view **view_ret, struct pe_image_inf
 
     if (base)
     {
+        /* see ios_exe_win_stripped_request */
+        ios_exe_win_stripped_request = (image_info->image_charact & IMAGE_FILE_RELOCS_STRIPPED) != 0;
         status = map_view( view_ret, base, size, alloc_type, vprot, limit_low, limit_high, 0 );
+        ios_exe_win_stripped_request = 0;
         /* ml988: commit or roll back a pending fixed-base claim. No-ops unless
          * ios_exe_win_claim granted this exact interval during the call above. */
         ios_exe_win_commit_claim( base, size, !status );
