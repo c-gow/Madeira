@@ -31,7 +31,7 @@ dependency license texts are in `LICENSES/`. See "Why GPL-3.0-or-later" below.
 | **Madeira Dock (`madeira-dock`, built into `arm64ec-windows/dockhost.exe`)** | original work, Copyright 2026 125hz | GPL-3.0-or-later + Converter Exception | Headless host for Valve's Steam client, a separate Windows program started in the Wine session. Built from the submodule by `build/madeira-dock/build.sh`; not committed as a binary. Its statically linked LLVM/MinGW-w64 runtime notices ship in `dock-notices.txt`. Valve's client files are downloaded by the user from Valve and are not covered by Madeira's licence. See `docs/MADEIRA_DOCK.md`. |
 | **Mesa** 25.0.7 (OSMesa, Zink, softpipe) | MIT (+ permissive, see `docs/license.rst`) | Patched (`build/mesa-ios/patches`). Separate dylib `gl/libOSMesa.dylib`, desktop OpenGL backend. |
 | **MoltenVK** 1.4.2 | Apache-2.0 | Unmodified. Separate dylib `gl/libMoltenVK.dylib`; contains SPIRV-Cross, SPIRV-Tools (Apache-2.0) and cereal (BSD-3-Clause). |
-| **LuaJIT** 2.1 | MIT | Unmodified. Separate x86-64 Windows DLL (`compat/love/lua51.dll`, built by `build/luajit-x64/build.sh`), copied into LOVE game folders in place of their `lua51.dll`. |
+| **LuaJIT** 2.1 | MIT | Unmodified. Separate x86-64 Windows DLL (`compat/love/lua51.dll`, built by `build/luajit-x64/build.sh`), loaded in place of a game's `lua51.dll` when that is an x64 LuaJIT needing memory below 2 GB (`build/wineserver/luajit_compat.c`); game files are not modified. |
 
 ## Why GPL-3.0-or-later
 

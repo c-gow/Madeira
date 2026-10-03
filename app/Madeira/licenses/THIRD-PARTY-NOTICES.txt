@@ -50,8 +50,9 @@ Statically linked into the application binary:
 Separate file in the bundle:
 - LuaJIT 2.1 (compat/love/lua51.dll, x86-64 Windows DLL, unmodified source
   built by build/luajit-x64/build.sh; commit in compat/love/lua51.dll.version):
-  MIT (LuaJIT-MIT.txt, copied by that script). Copied into LOVE game folders
-  at launch in place of the game's own lua51.dll.
+  MIT (LuaJIT-MIT.txt, copied by that script). Loaded in place of a game's
+  lua51.dll when that is an x64 LuaJIT needing memory below 2 GB; game files
+  are not modified.
 
 Dynamically loaded at runtime:
 - Mesa 25.0.7 OSMesa with the Zink and softpipe drivers (gl/libOSMesa.dylib,
