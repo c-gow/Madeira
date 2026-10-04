@@ -689,6 +689,9 @@ final class LibraryModel: ObservableObject {
     /// CS_DEBUGGED is set but no debugger is attached (JIT was enabled outside
     /// Madeira): the text of the alert that offers Madeira's own Enable JIT.
     @Published var jitNotice: String?
+    /// Play is enabling JIT before starting this entry (ContentView.jitReadyForLaunch):
+    /// its Play button reads Starting JIT, with a spinner, until JIT is on or fails.
+    @Published var startingJIT: UUID?
     /// A Steam game's saves may not be the latest (SteamOwnedLibrary.cloudHold):
     /// the alert Play shows before starting it.
     struct CloudNotice: Equatable {
@@ -1949,7 +1952,7 @@ struct LibraryView: View {
         // Enable JIT, for one) waited until the Library tab came back.
         .alert(jitProblem == nil ? "Library" : "Couldn't Enable JIT",
                isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
-            if let jitProblem { jitConnectionActions(jitProblem) { model.error = nil } }
+            if let jitProblem { jitConnectionActions(jitProblem, retry: enableJIT) { model.error = nil } }
             Button("OK", role: .cancel) { model.error = nil }
         } message: { Text(model.error ?? "") }
         .fullScreenCover(isPresented: $onboarding.presented) { OnboardingView() }
@@ -2053,14 +2056,15 @@ struct LibraryView: View {
                 SettingsSearchResults(query: settingsSearch.trimmingCharacters(in: .whitespaces), refresh: settingsRefresh)
             }
             // Credits, last on the Settings page.
-            if settingsShow("credits", "thanks", "Will Faust", "Nick", "125hz", "Jfishin", "Jesse", "JesseLovelace") {
+            if settingsShow("credits", "thanks", "Will Faust", "Nick", "125hz", "Jfishin", "Jesse", "JesseLovelace", "Dan Perks", "danperks") {
                 Section {
                     MadeiraCredit(name: "Will Faust", handle: "willfaust", role: "Created Madeira")
                     MadeiraCredit(name: "Nick", handle: "125hz", role: "32-bit game support, the game library and Madeira Dock")
                     MadeiraCredit(name: "Jfishin", handle: "Jfishin", role: "The original native Steam sign-in, library and downloads")
                     MadeiraCredit(name: "Jesse", handle: "JesseLovelace", role: "Steam Cloud saves, faster game launches, and fixes that let more games run")
+                    MadeiraCredit(name: "Dan Perks", handle: "danperks", role: "In-app JIT without StikDebug, and pairing without a computer")
                 } header: { Text("Credits") } footer: {
-                    Text("Madeira is built on Wine, FEX-Emu, DXMT by Feifan He (3Shain) with the Direct3D 9 frontend by David Acevedo (dacevedo12), rpmalloc by Mattias Jansson, StikDebug and StikJIT. Thank you to everyone who contributes to these projects.")
+                    Text("Madeira is built on Wine, FEX-Emu, DXMT by Feifan He (3Shain) with the Direct3D 9 frontend by David Acevedo (dacevedo12), rpmalloc by Mattias Jansson, StikDebug, StikJIT and idevice. Thank you to everyone who contributes to these projects.")
                 }
             }
         }
@@ -2177,7 +2181,11 @@ struct LibraryView: View {
             // library for the moment a start spends preparing.
             LibraryDetail(entry: entry, play: { profile in
                 play(profile)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 15) { if selected?.id == entry.id { selected = nil } }
+                // Not while Play is still enabling JIT: the session's start, an error, or
+                // JIT setup closes the page then.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 15) {
+                    if selected?.id == entry.id, model.startingJIT != entry.id { selected = nil }
+                }
             })
         }
         .onChange(of: model.current) { _, current in if current != nil { selected = nil } }
@@ -2185,6 +2193,7 @@ struct LibraryView: View {
         .onChange(of: model.restartNotice) { _, notice in if notice != nil { selected = nil } }
         .onChange(of: model.jitNotice) { _, notice in if notice != nil { selected = nil } }
         .onChange(of: model.cloudNotice) { _, notice in if notice != nil { selected = nil } }
+        .onChange(of: jit.showSetup) { _, show in if show { selected = nil } }
         .onChange(of: model.showDetail) { _, id in
             guard let id else { return }
             model.showDetail = nil
@@ -2362,8 +2371,18 @@ struct LibraryDetail: View {
                             } else if let played = entry.lastPlayed {
                                 Text("Last played \(played.formatted(.relative(presentation: .named)))").font(.subheadline).foregroundStyle(.secondary)
                             }
-                            Button(action: start) { HStack(spacing: 10) { Image(systemName: "play.fill"); Text("Play").fontWeight(.semibold) }.frame(minWidth: 100, minHeight: 30) }
-                                .buttonStyle(LibraryPlayStyle(pending: leaving)).disabled(leaving)
+                            Button(action: start) {
+                                HStack(spacing: 10) {
+                                    // Enabling JIT can take seconds with nothing else on screen.
+                                    if model.startingJIT == entry.id {
+                                        ProgressView().tint(.white)
+                                        Text("Starting JIT").fontWeight(.semibold)
+                                    } else {
+                                        Image(systemName: "play.fill"); Text("Play").fontWeight(.semibold)
+                                    }
+                                }.frame(minWidth: 100, minHeight: 30)
+                            }
+                            .buttonStyle(LibraryPlayStyle(pending: leaving)).disabled(leaving)
                         }
                     }.padding(.vertical, 24)
                         .listRowBackground(
