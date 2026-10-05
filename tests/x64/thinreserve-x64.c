@@ -4,7 +4,9 @@
  * some games do, then checks that:
  *   - every reservation succeeds (more than the ~64 GB a device can map),
  *   - committed memory of different reservations never aliases,
- *   - VirtualQuery reports the untouched part as MEM_RESERVE of its reservation,
+ *   - VirtualQuery reports the untouched part as reserved (just past a head:
+ *     reserved by its own reservation; further in, a thin tail may overlap a
+ *     later head, so only "not free" is checked there),
  *   - MEM_DECOMMIT of the whole range and MEM_RELEASE succeed,
  *   - released space is reused,
  *   - growing one range past its head fails cleanly (prints where).
@@ -86,8 +88,14 @@ int main( void )
     {
         check( VirtualQuery( base[i], &mbi, sizeof(mbi) ) && mbi.State == MEM_COMMIT &&
                mbi.AllocationBase == base[i], "query committed start", i );
-        check( VirtualQuery( base[i] + 512 * MB, &mbi, sizeof(mbi) ) && mbi.State == MEM_RESERVE &&
-               mbi.AllocationBase == base[i], "query +512 MB is reserved", i );
+        /* A thin tail overlaps later heads, so +512 MB may report another
+         * reservation; it must never report free. */
+        check( VirtualQuery( base[i] + 512 * MB, &mbi, sizeof(mbi) ) && mbi.State != MEM_FREE,
+               "query +512 MB is not free", i );
+        /* Just past a 63 MB head is the guard: reserved, and ours. */
+        check( VirtualQuery( base[i] + 63 * MB + 512 * 1024, &mbi, sizeof(mbi) ) &&
+               mbi.State == MEM_RESERVE && mbi.AllocationBase == base[i],
+               "query just past the head is our reservation", i );
     }
 
     /* 4. grow the last one in 1 MB steps up to 256 MB; report where it stops */
