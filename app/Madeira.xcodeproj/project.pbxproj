@@ -21,6 +21,7 @@
 		A1000904 /* AmbientGlow.metal in Sources */ = {isa = PBXBuildFile; fileRef = A2000904 /* AmbientGlow.metal */; };
 		A1000601 /* SteamOwnedLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000601 /* SteamOwnedLibrary.swift */; };
 		A1000700 /* SteamCloud.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000700 /* SteamCloud.swift */; };
+		A1000710 /* SavesAndShortcuts.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000710 /* SavesAndShortcuts.swift */; };
 		A1000602 /* SteamDownloadBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000602 /* SteamDownloadBackground.swift */; };
 		A1000600 /* SteamInstall.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000600 /* SteamInstall.swift */; };
 		A1000609 /* SwiftSteam/Content/ContentDecryptor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000609 /* ContentDecryptor.swift */; };
@@ -106,6 +107,7 @@
 		A1000060 /* libwin32u_unix.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000060 /* libwin32u_unix.a */; };
 		A1000070 /* Winios/Winios.m in Sources */ = {isa = PBXBuildFile; fileRef = A2000070 /* Winios/Winios.m */; };
 		A1000077 /* MadeiraConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000077 /* MadeiraConfig.swift */; };
+		A1000247 /* PadOutput.m in Sources */ = {isa = PBXBuildFile; fileRef = A2000247 /* PadOutput.m */; };
 		A1000080 /* arm64ec-windows in Resources */ = {isa = PBXBuildFile; fileRef = A2000080 /* arm64ec-windows */; };
 		A1000210 /* i386-windows in Resources */ = {isa = PBXBuildFile; fileRef = A2000210 /* i386-windows */; };
 		A1000081 /* x86_64-vcruntime in Resources */ = {isa = PBXBuildFile; fileRef = A2000081 /* x86_64-vcruntime */; };
@@ -189,6 +191,7 @@
 		A2000904 /* AmbientGlow.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = "AmbientGlow.metal"; sourceTree = "<group>"; };
 		A2000601 /* SteamOwnedLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamOwnedLibrary.swift"; sourceTree = "<group>"; };
 		A2000700 /* SteamCloud.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamCloud.swift"; sourceTree = "<group>"; };
+		A2000710 /* SavesAndShortcuts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SavesAndShortcuts.swift"; sourceTree = "<group>"; };
 		A2000602 /* SteamDownloadBackground.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamDownloadBackground.swift"; sourceTree = "<group>"; };
 		A2000600 /* SteamInstall.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamInstall.swift"; sourceTree = "<group>"; };
 		A2000609 /* ContentDecryptor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Content/ContentDecryptor.swift"; sourceTree = "<group>"; };
@@ -289,6 +292,8 @@
 		A2000070 /* Winios/Winios.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = Winios/Winios.m; sourceTree = "<group>"; };
 		A2000071 /* Winios/Winios.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Winios/Winios.h; sourceTree = "<group>"; };
 		A2000077 /* MadeiraConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MadeiraConfig.swift; sourceTree = "<group>"; };
+		A2000247 /* PadOutput.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PadOutput.m; sourceTree = "<group>"; };
+		A2000248 /* PadOutput.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = PadOutput.h; sourceTree = "<group>"; };
 		A2000080 /* arm64ec-windows */ = {isa = PBXFileReference; lastKnownFileType = folder; path = "arm64ec-windows"; sourceTree = "<group>"; };
 		A2000210 /* i386-windows */ = {isa = PBXFileReference; lastKnownFileType = folder; path = "i386-windows"; sourceTree = "<group>"; };
 		A2000081 /* x86_64-vcruntime */ = {isa = PBXFileReference; lastKnownFileType = folder; path = "x86_64-vcruntime"; sourceTree = "<group>"; };
@@ -405,6 +410,7 @@
 				A2000904 /* AmbientGlow.metal */,
 				A2000601 /* SteamOwnedLibrary.swift */,
 				A2000700 /* SteamCloud.swift */,
+				A2000710 /* SavesAndShortcuts.swift */,
 				A2000602 /* SteamDownloadBackground.swift */,
 				A2000600 /* SteamInstall.swift */,
 				A2000609 /* ContentDecryptor.swift */,
@@ -492,6 +498,8 @@
 				A2000070 /* Winios/Winios.m */,
 				A2000701 /* Winios/WiniosGL.m */,
 				A2000071 /* Winios/Winios.h */,
+				A2000247 /* PadOutput.m */,
+				A2000248 /* PadOutput.h */,
 				A2000034 /* wine_stubs.c */,
 				A2000006 /* Madeira-Bridging-Header.h */,
 				A2000007 /* Madeira.entitlements */,
@@ -718,6 +726,7 @@
 				A1000904 /* AmbientGlow.metal in Sources */,
 				A1000601 /* SteamOwnedLibrary.swift in Sources */,
 				A1000700 /* SteamCloud.swift in Sources */,
+				A1000710 /* SavesAndShortcuts.swift in Sources */,
 				A1000602 /* SteamDownloadBackground.swift in Sources */,
 				A1000600 /* SteamInstall.swift in Sources */,
 				A1000609 /* SwiftSteam/Content/ContentDecryptor.swift in Sources */,
@@ -775,6 +784,7 @@
 				A1000050 /* IOSDisplayShim.m in Sources */,
 				A1000070 /* Winios/Winios.m in Sources */,
 				A1000701 /* Winios/WiniosGL.m in Sources */,
+				A1000247 /* PadOutput.m in Sources */,
 				A1000035 /* StikJITHelper.swift in Sources */,
 				B1000001 /* JITSetup.swift in Sources */,
 				B1000050 /* JITNetwork.swift in Sources */,

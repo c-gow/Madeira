@@ -79,6 +79,36 @@ final class MetalHostView: UIView {
     required init?(coder: NSCoder) { fatalError() }
 }
 
+/// Touches on the game view outside the on-screen controls reach the program as
+/// a mouse. Some games (Dark Souls Remastered) switch to keyboard and mouse
+/// prompts on any mouse event and then ignore the controller, so a stray tap
+/// next to a touch button costs the player the controller. MADEIRA_TOUCH_MOUSE
+/// (madeira.cfg `env.NAME`, else the process environment): "1" always sends
+/// them (the previous behaviour), "0" never does, and by default they are not
+/// sent while the landscape overlay shows at least one controller mapping,
+/// unless touch is set to work as a trackpad. A hardware mouse or trackpad is
+/// not affected.
+@MainActor enum TouchMouseGate {
+    enum Mode: String { case auto, on, off }
+    static let mode: Mode = {
+        let v = MadeiraConfig.get("env.MADEIRA_TOUCH_MOUSE")  // 1: touches always reach the program as a mouse, 0: never; default: not while touch controller mappings are shown
+            ?? ProcessInfo.processInfo.environment["MADEIRA_TOUCH_MOUSE"]
+        let m: Mode = v == "1" ? .on : (v == "0" ? .off : .auto)
+        LogStore.shared.log("[touch-mouse] mode=\(m.rawValue)")
+        return m
+    }()
+    /// Set by TouchControlsOverlay.configureGamepad: the landscape overlay is
+    /// visible, not editing, and has at least one controller mapping.
+    static var padOverlay = false
+    static func suppressing(touchpad: Bool) -> Bool {
+        switch mode {
+        case .on: return false
+        case .off: return true
+        case .auto: return padOverlay && !touchpad
+        }
+    }
+}
+
 // SwiftUI-hosted placeholder: geometry + touch input only.
 final class MetalBackedView: UIView {
     private static var layerRegistered = false
@@ -503,8 +533,33 @@ final class MetalBackedView: UIView {
         (event?.allTouches ?? []).filter { $0.phase != .ended && $0.phase != .cancelled }
     }
 
+    // Direct touches that began while TouchMouseGate was suppressing stay
+    // swallowed until they lift, so a change of the gate never leaves a button held.
+    private var tmgSwallowed: Set<ObjectIdentifier> = []
+    /// Returns the touches that should still be handled (nil = nothing left).
+    private func tmgFilter(_ touches: Set<UITouch>, _ phase: UITouch.Phase) -> Set<UITouch>? {
+        if phase == .began {
+            _ = TouchMouseGate.mode   // logs the mode once
+            guard TouchMouseGate.suppressing(touchpad: touchPointerMode) else { return touches }
+            let direct = touches.filter { $0.type == .direct }
+            guard !direct.isEmpty else { return touches }
+            for t in direct { tmgSwallowed.insert(ObjectIdentifier(t)) }
+            let rest = touches.subtracting(direct)
+            return rest.isEmpty ? nil : rest
+        }
+        guard !tmgSwallowed.isEmpty else { return touches }
+        let mine = touches.filter { tmgSwallowed.contains(ObjectIdentifier($0)) }
+        guard !mine.isEmpty else { return touches }
+        if phase == .ended || phase == .cancelled {
+            for t in mine { tmgSwallowed.remove(ObjectIdentifier(t)) }
+        }
+        let rest = touches.subtracting(mine)
+        return rest.isEmpty ? nil : rest
+    }
+
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         if HardwareInput.shared.interceptTouches(touches, event, .began) { return }
+        guard let touches = tmgFilter(touches, .began) else { return }
         if touchPointerMode { touchModeBegan(touches); return }
         guard desktopMode else {
             guard let t = touches.first else { return }
@@ -551,6 +606,7 @@ final class MetalBackedView: UIView {
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         if HardwareInput.shared.interceptTouches(touches, event, .moved) { return }
+        guard let touches = tmgFilter(touches, .moved) else { return }
         if touchPointerMode { touchModeMoved(touches, event); return }
         guard desktopMode else {
             guard let t = touches.first else { return }
@@ -632,6 +688,7 @@ final class MetalBackedView: UIView {
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         if HardwareInput.shared.interceptTouches(touches, event, .ended) { return }
+        guard let touches = tmgFilter(touches, .ended) else { return }
         if touchPointerMode { touchModeEnded(touches, event); return }
         guard desktopMode else {
             guard let t = touches.first else { return }
@@ -675,6 +732,7 @@ final class MetalBackedView: UIView {
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         if HardwareInput.shared.interceptTouches(touches, event, .cancelled) { return }
+        guard let touches = tmgFilter(touches, .cancelled) else { return }
         if touchPointerMode { touchModeCancelled(touches); return }
         guard desktopMode else {
             guard let t = touches.first else { return }
@@ -1293,6 +1351,10 @@ struct ContentView: View {
             .onReceive(NotificationCenter.default.publisher(for: SteamSignIn.didChange)) { _ in
                 if !SteamSignIn.isSignedIn { MadeiraDock.cleanup() }
             }
+            // A Home Screen shortcut (madeira://play?exe=...) starts its library entry,
+            // now or, from a cold start, once the library is up.
+            .onReceive(ShortcutRouter.shared.$pendingExe) { _ in launchPendingShortcut() }
+            .onChange(of: library.enabled) { _, _ in launchPendingShortcut() }
         }
     }
 
@@ -2383,6 +2445,26 @@ struct ContentView: View {
         }
     }
 
+    /// A Home Screen shortcut waiting for the library (a link opened at a cold start
+    /// arrives before the library is up).
+    private func launchPendingShortcut() {
+        guard library.enabled, library.current == nil, let exe = ShortcutRouter.shared.pendingExe else { return }
+        ShortcutRouter.shared.pendingExe = nil
+        launchShortcut(exe)
+    }
+
+    /// A Home Screen shortcut starts a game that is in the library, by its Windows
+    /// path. A link names any path, so one for a program not in the library starts
+    /// nothing: add it to the library first.
+    private func launchShortcut(_ exe: String) {
+        let key = exe.lowercased()
+        if let entry = library.entries.first(where: { $0.desktop != true && $0.windowsPath.lowercased() == key }) {
+            launchLibraryEntry(entry); return
+        }
+        LogStore.shared.log("[shortcut] \(exe) is not in the library: not started", level: .error)
+        library.error = "This shortcut's game is not in the library. Add it to the library, then use the shortcut again."
+    }
+
     /// Play in the library (Library.swift): checks that a session can start,
     /// applies the entry's launch profile and runs the same full sequence as the
     /// developer interface's buttons.
@@ -2429,10 +2511,17 @@ struct ContentView: View {
             logStore.log("[launch-preflight] profile validation failed: \(error.localizedDescription)", level: .error)
             return
         }
-        guard entry.launchWindowsPath.utf8.count < 1024, entry.launchArguments.utf8.count < 1024 else {
+        // launchArguments carries the whole ml1163 command (explorer's /desktop=, the quoted
+        // program, its arguments); validate() and the bridge's tokenizer take 4 KB.
+        guard entry.launchWindowsPath.utf8.count < 1024, entry.launchArguments.utf8.count < 4096 else {
             library.error = "The executable path or launch arguments are too long."; return
         }
         entry.configureLaunch()
+        // This run's log under the program's name too (Documents/logs). A Steam game started
+        // through Madeira Dock above gets its own from ntdll, once Valve's client starts it.
+        let program = entry.desktop == true ? "explorer.exe"
+            : entry.launchWindowsPath.split(separator: "\\").last.map(String.init) ?? entry.launchWindowsPath
+        LogStore.shared.startSessionLog(program: program)
         library.begin(entry)
         runWineFullSequence(profile: entry)
     }
@@ -2453,6 +2542,8 @@ struct ContentView: View {
         /* ml1095: one config file. Written once from any legacy madeira-*.txt. */
         MadeiraConfig.migrateLegacy { self.logStore.log($0) }
         MadeiraConfig.deleteLegacyFiles { self.logStore.log($0) }   /* ml1096: the old files go once the cfg exists */
+        /* ml2100: XInput (default) or the HID controller; before the wineserver starts. */
+        GamepadInput.shared.beginPadSession()
         /* ml1990: player 1 exists before the game enumerates XInput. */
         GamepadInput.shared.reserveSessionSlot(touchControls: TouchControlsModel.shared.offersControllerInput)
         if MadeiraConfig.present {
@@ -2486,6 +2577,8 @@ struct ContentView: View {
             if let profile {
                 profile.applyEnvironment()
                 logStore.log("[launch-route] library profile applied")
+            } else {
+                _ = try? MadeiraConfig.applyGame(nil)   // no library game: no game's own lines
             }
 
             // Step 1: Allocate JIT pool (BRK suspends entire process)
@@ -2654,12 +2747,46 @@ struct ContentView: View {
             // d3d11.mipClampBC=N is the one that matters for memory: this GPU cannot
             // sample BC, so those textures are expanded to uncompressed and cost 2-8x
             // their shipped size.
-            if let txt = MadeiraConfig.get("dxmt") {
-                let v = txt.replacingOccurrences(of: ";", with: "\n").trimmingCharacters(in: .whitespacesAndNewlines)   /* ml1095: "a=b;c=d" on one line */
-                if !v.isEmpty {
-                    setenv("DXMT_CONFIG", v, 1)
-                    logStore.log("DXMT config: \(v) via madeira.cfg dxmt")
+            // DXMT splits DXMT_CONFIG on ";" only and a newline is not whitespace to
+            // its line parser, so the options are joined with ";" (ml1095: "a=b;c=d"
+            // on one line). A library game's own dxmt options come after madeira.cfg's.
+            // ml1255: "#" pieces (comments) are dropped; DXMT skips them anyway, but
+            // they would count against its length limit below.
+            var dxmtOptions: [String] = []
+            for (source, txt) in [("madeira.cfg dxmt", MadeiraConfig.get("dxmt")), ("the game's config", MadeiraConfig.gameValue("dxmt"))] {
+                let parts = (txt ?? "").split(whereSeparator: { $0 == ";" || $0.isNewline })
+                    .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty && !$0.hasPrefix("#") }
+                if !parts.isEmpty {
+                    dxmtOptions += parts
+                    logStore.log("DXMT config: \(parts.joined(separator: ";")) via \(source) (\(parts.count) option\(parts.count == 1 ? "" : "s"))")
                 }
+            }
+            // MetalFX spatial upscaling (metalfx-upscale; Game details › MetalFX
+            // upscaling writes it to the game's own lines). The D3D12 runtime reads
+            // the key itself; D3D11 games get DXMT's MetalFX swapchain at the same
+            // factor (DXMT takes 1 to 2).
+            if let txt = MadeiraConfig.gameValue("metalfx-upscale") ?? MadeiraConfig.get("metalfx-upscale"),
+               let factor = Double(txt), factor >= 1.1 {
+                setenv("DXMT_METALFX_SPATIAL_SWAPCHAIN", "1", 1)
+                dxmtOptions.append("d3d11.metalSpatialUpscaleFactor=\(min(factor, 2))")
+                logStore.log("MetalFX upscaling: \(txt)x via metalfx-upscale")
+            } else {
+                unsetenv("DXMT_METALFX_SPATIAL_SWAPCHAIN")
+            }
+            // A library entry's "Report an NVIDIA GPU" (LibraryEntry.applyEnvironment):
+            // DXGI's device id is the GeForce RTX 3060 win32u registers as the
+            // display adapter (sysparams_ios.c), so every API names one GPU.
+            if profile?.reportNVIDIA == true {
+                dxmtOptions.append("dxgi.customDeviceId=2544")
+                logStore.log("DXMT config: dxgi.customDeviceId=2544 via Report an NVIDIA GPU")
+            }
+            // Unset otherwise, so a previous session's options in this app process do not apply.
+            if !dxmtOptions.isEmpty { setenv("DXMT_CONFIG", dxmtOptions.joined(separator: ";"), 1) } else { unsetenv("DXMT_CONFIG") }
+            // ml1255: DXMT reads the variable into a MAX_PATH buffer (util_env.cpp
+            // getEnvVar); from a longer value it gets nothing, and every option is lost.
+            let dxmtLength = dxmtOptions.joined(separator: ";").utf16.count
+            if dxmtLength > 259 {
+                logStore.log("DXMT config is \(dxmtLength) characters; DXMT reads at most 259 and drops ALL of it -- shorten the dxmt lines of madeira.cfg and the game's config", level: .error)
             }
 
             // D3D9 frontend for 32-bit programs. The i386 d3d9.dll is DXMT's thin
@@ -3762,7 +3889,7 @@ struct TouchControlsOverlay: View {
             .onChange(of: m.visible) { _, _ in configureGamepad(landscape: landscape) }
             .onChange(of: m.editing) { _, _ in configureGamepad(landscape: landscape) }
             .onChange(of: library.blocksGameplayTouch) { _, _ in configureGamepad(landscape: landscape) }
-            .onDisappear { GamepadInput.shared.configureTouch(controls: []) }
+            .onDisappear { GamepadInput.shared.configureTouch(controls: []); TouchMouseGate.padOverlay = false }
         }
         .ignoresSafeArea()
     }
@@ -3793,6 +3920,7 @@ struct TouchControlsOverlay: View {
         let ids = landscape && m.visible && !m.editing && !library.blocksGameplayTouch
             ? m.controls.filter { $0.action.padName.map(TouchPadAction.supported) ?? false }.map(\.id) : []
         GamepadInput.shared.configureTouch(controls: Set(ids))
+        TouchMouseGate.padOverlay = !ids.isEmpty
     }
 
     /// ml1970: with MADEIRA_CONTROLS_XBOX_DEFAULT=1, a user with no controls file gets the built-in controller
