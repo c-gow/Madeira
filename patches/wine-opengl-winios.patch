@@ -1,11 +1,11 @@
 diff --git a/LICENSE-MADEIRA.md b/LICENSE-MADEIRA.md
-index df45a9e60d9..8e8d72c0162 100644
+index fd2bc64a9a2..60ee828d969 100644
 --- a/LICENSE-MADEIRA.md
 +++ b/LICENSE-MADEIRA.md
-@@ -55,6 +55,18 @@ distributes under **LGPL-2.1-or-later**. This branch keeps that licence.
-     above and came first; it is recorded as merged with no change of its own.
-   - Author bahacan16, merged on 2026-10-06: `67b8c8bed51` (xinput1_3 iOS:
-     send XInputSetState motors to the host pad, pull request #20).
+@@ -58,6 +58,18 @@ distributes under **LGPL-2.1-or-later**. This branch keeps that licence.
+   - Author spitefulowl, merged on 2026-10-06: `000cac48452` (mscoree iOS:
+     cooperative thread suspend and keep-delegates for Wine Mono, pull request
+     #26).
 +  - opengl32: OpenGL ES contexts for Madeira's winios WGL driver
 +    (`dlls/opengl32/unix_wgl.c`) and the fixed low image base limited to x86
 +    builds (`dlls/opengl32/Makefile.in`). Author: Connor Gow, written with AI
