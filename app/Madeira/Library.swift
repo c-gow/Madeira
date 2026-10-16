@@ -3028,6 +3028,7 @@ struct LibraryDetail: View {
                 // details (SteamGames.swift).
                 if let appID = entry.steamAppID {
                     SteamCloudSection(appID: appID)
+                    SteamWorkshopSection(appID: appID)
                     SteamEntrySection(entry: $entry) { leaving = true; dismiss() }
                 }
                 Section {

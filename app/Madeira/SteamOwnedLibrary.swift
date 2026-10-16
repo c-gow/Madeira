@@ -957,6 +957,95 @@ final class SteamOwnedLibrary: ObservableObject {
         SteamLog.event("[steam-depot] resumed after the background count=\(ids.count)")
     }
 
+    // MARK: Workshop
+
+    /// madeira.cfg `env.MADEIRA_STEAM_WORKSHOP = 0` turns Workshop sync off.
+    static var workshopEnabled: Bool { enabled && SteamSignIn.flag("MADEIRA_STEAM_WORKSHOP", default: true) }
+    /// Workshop sync state of the games synced in this app run, by App ID.
+    @Published private(set) var workshop: [Int: SteamWorkshopState] = [:]
+    private var workshopBusy: Set<Int> = []
+
+    /// Downloads the account's subscribed Workshop items for a game that are
+    /// missing or out of date, and records them where Valve's client looks.
+    /// Unsubscribed items are dropped from the record and their folders removed.
+    func syncWorkshop(_ appID: Int) async {
+        guard Self.workshopEnabled, signedIn, !inSession, appID > 0, appID <= Int(UInt32.max),
+              !workshopBusy.contains(appID) else { return }
+        workshopBusy.insert(appID)
+        defer { workshopBusy.remove(appID) }
+        let app = UInt32(appID), apps = Self.steamApps
+        var state = SteamWorkshopState(phase: .listing)
+        workshop[appID] = state
+        do {
+            try await session.ensureConnected()
+            let steamID = session.steamID
+            let depot = (try await fetcher.fetchAppInfo(appID: app))?.workshopDepot ?? 0
+            var items: [SteamWorkshopItem] = []
+            var page: UInt32 = 1
+            while true {
+                let reply = try SteamWorkshop.parse(try await session.callServiceMethod(
+                    method: .publishedFileGetUserFiles,
+                    body: SteamWorkshop.request(steamID: steamID, appID: app, page: page), timeout: 20))
+                items += reply.items
+                if reply.items.isEmpty || items.count >= Int(reply.total) || page >= 50 { break }
+                page += 1
+            }
+            items = items.filter { $0.consumerAppID == 0 || $0.consumerAppID == app }
+            var record = SteamWorkshop.readRecord(appID: app, steamApps: apps)
+            let wanted = Set(items.map(\.id))
+            for gone in record.keys where !wanted.contains(gone) {
+                record[gone] = nil
+                try? FileManager.default.removeItem(at: SteamWorkshop.itemFolder(appID: app, item: gone, steamApps: apps))
+            }
+            let stale = items.filter { item in
+                guard item.downloadable else { return false }
+                guard let have = record[item.id] else { return true }
+                return have.manifest != item.manifest || have.timeUpdated < item.timeUpdated
+                    || !FileManager.default.fileExists(atPath: SteamWorkshop.itemFolder(appID: app, item: item.id, steamApps: apps).path)
+            }
+            state.subscribed = items.count
+            state.installed = items.count - stale.count
+            state.pending = stale.count
+            state.phase = stale.isEmpty ? .done : .downloading
+            workshop[appID] = state
+            SteamLog.event("[steam-workshop] app=\(appID) subscribed=\(items.count) to-download=\(stale.count) depot=\(depot == 0 ? app : depot)")
+            let accountID = UInt32(steamID & 0xFFFF_FFFF)
+            for (index, item) in stale.enumerated() {
+                try Task.checkCancellation()
+                if inSession { break }
+                state.current = index + 1
+                state.progress = SteamDownloadProgress()
+                workshop[appID] = state
+                let folder = SteamWorkshop.itemFolder(appID: app, item: item.id, steamApps: apps)
+                let size: UInt64
+                if item.manifest != 0 {
+                    size = try await downloader.installWorkshopItem(
+                        appID: app, depotID: depot == 0 ? app : depot, manifestGID: item.manifest, folder: folder,
+                        journalDir: SteamWorkshop.journal(appID: app, item: item.id, steamApps: apps)) { [weak self] progress in
+                            Task { @MainActor in self?.workshop[appID]?.progress = progress }
+                        }
+                } else {
+                    let name = SteamWorkshop.safeFileName(item.fileName, item: item.id)
+                    size = try await downloader.downloadWorkshopFile(item.fileURL, to: folder.appendingPathComponent(name))
+                }
+                record[item.id] = SteamWorkshop.Installed(size: size, timeUpdated: item.timeUpdated, manifest: item.manifest)
+                try SteamWorkshop.writeRecord(appID: app, steamApps: apps, accountID: accountID, items: record)
+                state.installed += 1
+                workshop[appID] = state
+                SteamLog.event("[steam-workshop] app=\(appID) item=\(item.id) bytes=\(size)")
+            }
+            try SteamWorkshop.writeRecord(appID: app, steamApps: apps, accountID: accountID, items: record)
+            state.phase = .done
+            workshop[appID] = state
+        } catch is CancellationError {
+            state.phase = .idle; workshop[appID] = state
+        } catch {
+            state.phase = .failed(error.localizedDescription)
+            workshop[appID] = state
+            SteamLog.event("[steam-workshop] app=\(appID) failed reason=\(Self.reason(error))")
+        }
+    }
+
     // MARK: Downloads
 
     /// Whether Steam lists a newer build than the installed record.

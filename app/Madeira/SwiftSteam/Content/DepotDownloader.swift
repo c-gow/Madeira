@@ -801,3 +801,78 @@ final class JournalWriter {
         return keys
     }
 }
+
+// MARK: - Workshop items
+
+extension DepotDownloader {
+    /// Download one Workshop item's content (a manifest of the app's workshop
+    /// depot) into `folder`, the way Valve's client lays it out under
+    /// `steamapps/workshop/content/<appid>/<itemid>`. Returns the content size.
+    func installWorkshopItem(appID: UInt32, depotID: UInt32, manifestGID: UInt64,
+                             folder: URL, journalDir: URL,
+                             progress report: @escaping (SteamDownloadProgress) -> Void) async throws -> UInt64 {
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: journalDir, withIntermediateDirectories: true)
+        var state = SteamDownloadProgress()
+        report(state)
+
+        let hosts: [String]
+        if let provider = contentHosts { hosts = try await provider(appID) } else { hosts = try await contentServers(appID: appID) }
+        guard !hosts.isEmpty else { throw SteamError.chunkDownloadFailed("No content servers are available.") }
+        let key = try await depotKey(depotID: depotID, appID: appID)
+        let manifest = try await fetchManifest(depotID: depotID, appID: appID, manifestGID: manifestGID, key: key, hosts: hosts)
+        let pool = Array(hosts.prefix(hostPoolSize))
+        var auth: [String: String] = [:]
+        for host in pool { auth[host] = await cdnAuthFragment(depotID: depotID, appID: appID, host: host) }
+        let plan = DepotPlan(depotID: depotID, manifestGID: manifestGID, key: key, manifest: manifest,
+                             hosts: pool, auth: auth, declaredSize: manifest.totalUncompressedSize,
+                             health: ContentHostHealth())
+        let prepared = try await Task.detached(priority: .userInitiated) {
+            try Self.prepare(plans: [plan], installURL: folder, journalDir: journalDir)
+        }.value
+        state.totalBytes = prepared.totalBytes
+        state.doneBytes = prepared.doneBytes
+        state.phase = .downloading
+        report(state)
+
+        let journal = try JournalWriter(url: prepared.journals[0])
+        defer { journal.close() }
+        let work = prepared.pending[0], paths = prepared.paths[0], existing = prepared.existing[0]
+        let maximum = maxConcurrentChunks, attempts = attemptsPerChunk
+        var lastReport = Date.distantPast
+        try await withThrowingTaskGroup(of: (UInt64, UInt64).self) { group in
+            var next = 0
+            func enqueue() {
+                guard next < work.count else { return }
+                let item = work[next]; next += 1
+                let chunk = plan.manifest.files[item.file].chunks[item.chunk]
+                let path = paths[item.file]
+                let verify = existing[item.file]
+                group.addTask {
+                    if verify, Self.chunkAlreadyPresent(chunk, path: path) { return (item.key, UInt64(chunk.compressedSize)) }
+                    try await Self.fetchChunk(chunk, plan: plan, path: path, attempts: attempts, seed: item.file &+ item.chunk)
+                    return (item.key, UInt64(chunk.compressedSize))
+                }
+            }
+            for _ in 0..<min(maximum, work.count) { enqueue() }
+            for try await (key, bytes) in group {
+                journal.append(key)
+                state.doneBytes += bytes
+                if Date().timeIntervalSince(lastReport) >= 0.25 { lastReport = Date(); report(state) }
+                enqueue()
+            }
+        }
+        state.phase = .finishing
+        report(state)
+        try? FileManager.default.removeItem(at: journalDir)
+        return prepared.totalUncompressed
+    }
+
+    /// Download a legacy Workshop item (a single file behind `file_url`).
+    func downloadWorkshopFile(_ url: String, to file: URL) async throws -> UInt64 {
+        let data = try await Self.download(url)
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: file, options: .atomic)
+        return UInt64(data.count)
+    }
+}

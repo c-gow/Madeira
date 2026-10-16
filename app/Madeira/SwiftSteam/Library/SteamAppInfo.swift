@@ -17,6 +17,9 @@ struct SteamAppInfo {
     var oslist: String = ""         // "macos", "windows", "macos,windows", etc.
     var depots: [DepotInfo] = []
     var buildID: UInt32 = 0
+    /// `depots/workshopdepot`: the depot Workshop items of this app are
+    /// published in. Zero or absent means the app's own ID.
+    var workshopDepot: UInt32 = 0
     var freeToDownload = false
     /// Apps owning depots this app installs through `depotfromapp`, so the
     /// install record names them the way Valve's client does.
@@ -329,6 +332,12 @@ struct SteamAppInfo {
                     }
                 }
                 info.depots.append(di)
+            }
+
+            if let text = depots["workshopdepot"] as? String, let id = UInt32(text) {
+                info.workshopDepot = id
+            } else if let id = depots["workshopdepot"] as? UInt32 {
+                info.workshopDepot = id
             }
 
             // Build ID
