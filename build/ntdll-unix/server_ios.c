@@ -2997,7 +2997,19 @@ static int wait_select_reply( void *cookie )
         ret = read( ntdll_get_thread_data()->wait_fd[0], &reply, sizeof(reply) );
         if (ret == sizeof(reply))
         {
-            if (!reply.cookie) abort_thread( reply.signaled );  /* thread got killed */
+            if (!reply.cookie)  /* thread got killed */
+            {
+#ifdef WINE_IOS
+                /* A wait inside an uninterrupted section (virtual_locked_server_call,
+                 * an APC run from a wait) must not exit holding the section's mutex,
+                 * which is shared by every process here. A Chromium GPU helper that
+                 * ended itself left virtual_mutex held this way and every process
+                 * stopped in NtAllocateVirtualMemory. Fail the wait; the thread exits
+                 * when it leaves its sections, as for a dead request pipe. */
+                if (ios_defer_section_abort()) return STATUS_THREAD_IS_TERMINATING;
+#endif
+                abort_thread( reply.signaled );
+            }
             if (wine_server_get_ptr(reply.cookie) == cookie) return reply.signaled;
             /* we stole another reply, wait for the real one */
             signaled = wait_select_reply( cookie );
