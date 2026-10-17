@@ -29,6 +29,7 @@
 #include <stdarg.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <string.h>
 #include <fcntl.h>   /* ml1003: O_RDONLY for the escape-hatch read */
 #ifdef HAVE_SYS_SYSCTL_H
 #include <sys/sysctl.h>
@@ -1131,6 +1132,57 @@ int read_process_memory( struct process *process, client_ptr_t ptr, data_size_t 
     return (ret == KERN_SUCCESS);
 }
 
+#ifdef WINE_IOS
+/* Write into a paused pseudo-process of this task. It shares our address
+ * space, so copy directly, region by region, making a read-only region writable
+ * for the copy only. Never task_suspend() here: the target task is our own. */
+static int ios_write_paused_local( client_ptr_t ptr, data_size_t size, const char *src, data_size_t *written )
+{
+    mach_vm_address_t cur = (mach_vm_address_t)ptr;
+    data_size_t left = size;
+    kern_return_t kr = KERN_SUCCESS;
+
+    if ((mach_vm_address_t)ptr != ptr) { set_error( STATUS_ACCESS_DENIED ); return 0; }
+    while (left)
+    {
+        mach_vm_address_t addr = cur;
+        mach_vm_size_t rsize, n;
+        vm_region_basic_info_data_64_t info;
+        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t obj;
+
+        kr = mach_vm_region( mach_task_self(), &addr, &rsize, VM_REGION_BASIC_INFO_64,
+                             (vm_region_info_t)&info, &count, &obj );
+        if (kr != KERN_SUCCESS) break;
+        if (addr > cur) { kr = KERN_INVALID_ADDRESS; break; }
+        n = rsize - (cur - addr);
+        if (n > left) n = left;
+        if (!(info.protection & VM_PROT_WRITE))
+        {
+            if (!(info.max_protection & VM_PROT_WRITE)) { kr = KERN_PROTECTION_FAILURE; break; }
+            kr = mach_vm_protect( mach_task_self(), cur, n, 0, (info.protection | VM_PROT_WRITE) & ~VM_PROT_EXECUTE );
+            if (kr != KERN_SUCCESS) break;
+            memcpy( (void *)cur, src + (size - left), n );
+            mach_vm_protect( mach_task_self(), cur, n, 0, info.protection );
+        }
+        else memcpy( (void *)cur, src + (size - left), n );
+        if (written) *written += n;
+        cur += n;
+        left -= n;
+    }
+    if (kr != KERN_SUCCESS)
+    {
+        static int logs;
+        if (logs++ < 32)
+            fprintf( stderr, "[paused-write] 0x%llx+0x%x failed kr=%d at 0x%llx\n",
+                     (unsigned long long)ptr, size, kr, (unsigned long long)cur );
+        mach_set_error( kr );
+        return 0;
+    }
+    return 1;
+}
+#endif
+
 /* write data to a process memory space */
 int write_process_memory( struct process *process, client_ptr_t ptr, data_size_t size, const char *src,
                           data_size_t *written )
@@ -1140,6 +1192,33 @@ int write_process_memory( struct process *process, client_ptr_t ptr, data_size_t
     mach_vm_offset_t data;
 
     if (written) *written = 0;
+
+#ifdef WINE_IOS
+    /* A pseudo-process in this task that is paused (every thread suspended,
+     * e.g. created with CREATE_SUSPENDED and not yet resumed) may be written to.
+     * Chromium's sandbox broker sets its targets up this way, and kills a target
+     * it cannot write to. Writes into running pseudo-processes stay denied: allowing
+     * them all once regressed Steam (see read_process_memory).
+     * madeira.cfg no-paused-write = 1 turns this off. */
+    if (!process_port && process->unix_pid == getpid() && !process->is_terminating)
+    {
+        static int off = -1;
+        struct thread *thread;
+        int paused = 1, any = 0;
+
+        if (off < 0) off = madeira_cfg_bool( "no-paused-write", 0 );
+        if (!off)
+        {
+            LIST_FOR_EACH_ENTRY( thread, &process->thread_list, struct thread, proc_entry )
+            {
+                any = 1;
+                if (thread->state == TERMINATED) continue;
+                if (thread->suspend + process->suspend <= 0) { paused = 0; break; }
+            }
+            if (any && paused) return ios_write_paused_local( ptr, size, src, written );
+        }
+    }
+#endif
 
     if (!process_port)
     {
