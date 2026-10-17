@@ -1017,24 +1017,41 @@ final class SteamOwnedLibrary: ObservableObject {
                 state.progress = SteamDownloadProgress()
                 workshop[appID] = state
                 let folder = SteamWorkshop.itemFolder(appID: app, item: item.id, steamApps: apps)
-                let size: UInt64
-                if item.manifest != 0 {
-                    size = try await downloader.installWorkshopItem(
-                        appID: app, depotID: depot == 0 ? app : depot, manifestGID: item.manifest, folder: folder,
-                        journalDir: SteamWorkshop.journal(appID: app, item: item.id, steamApps: apps)) { [weak self] progress in
-                            Task { @MainActor in self?.workshop[appID]?.progress = progress }
+                let kind = item.manifest != 0 ? "depot" : "file"
+                do {
+                    var size: UInt64 = 0
+                    if item.manifest != 0 {
+                        do {
+                            size = try await downloader.installWorkshopItem(
+                                appID: app, depotID: depot == 0 ? app : depot, manifestGID: item.manifest, folder: folder,
+                                journalDir: SteamWorkshop.journal(appID: app, item: item.id, steamApps: apps)) { [weak self] progress in
+                                    Task { @MainActor in self?.workshop[appID]?.progress = progress }
+                                }
+                        } catch let error where !(error is CancellationError) && item.fileURL.hasPrefix("https://") {
+                            // Some items list both; the single file is the fallback.
+                            SteamLog.event("[steam-workshop] app=\(appID) item=\(item.id) depot-failed reason=\(Self.reason(error)) trying=file")
+                            size = try await downloader.downloadWorkshopFile(
+                                item.fileURL, to: folder.appendingPathComponent(SteamWorkshop.safeFileName(item.fileName, item: item.id)))
                         }
-                } else {
-                    let name = SteamWorkshop.safeFileName(item.fileName, item: item.id)
-                    size = try await downloader.downloadWorkshopFile(item.fileURL, to: folder.appendingPathComponent(name))
+                    } else {
+                        let name = SteamWorkshop.safeFileName(item.fileName, item: item.id)
+                        size = try await downloader.downloadWorkshopFile(item.fileURL, to: folder.appendingPathComponent(name))
+                    }
+                    record[item.id] = SteamWorkshop.Installed(size: size, timeUpdated: item.timeUpdated, manifest: item.manifest)
+                    try SteamWorkshop.writeRecord(appID: app, steamApps: apps, accountID: accountID, items: record)
+                    state.installed += 1
+                    SteamLog.event("[steam-workshop] app=\(appID) item=\(item.id) kind=\(kind) bytes=\(size)")
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    // One item that fails (removed, hidden, a server refusing it) does not stop the rest.
+                    state.failed += 1
+                    SteamLog.event("[steam-workshop] app=\(appID) item=\(item.id) kind=\(kind) failed reason=\(Self.reason(error)) detail=\(error.localizedDescription)")
                 }
-                record[item.id] = SteamWorkshop.Installed(size: size, timeUpdated: item.timeUpdated, manifest: item.manifest)
-                try SteamWorkshop.writeRecord(appID: app, steamApps: apps, accountID: accountID, items: record)
-                state.installed += 1
                 workshop[appID] = state
-                SteamLog.event("[steam-workshop] app=\(appID) item=\(item.id) bytes=\(size)")
             }
             try SteamWorkshop.writeRecord(appID: app, steamApps: apps, accountID: accountID, items: record)
+            SteamLog.event("[steam-workshop] app=\(appID) done installed=\(state.installed) failed=\(state.failed)")
             state.phase = .done
             workshop[appID] = state
         } catch is CancellationError {

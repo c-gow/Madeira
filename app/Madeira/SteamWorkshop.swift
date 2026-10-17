@@ -183,6 +183,8 @@ struct SteamWorkshopState: Equatable {
     var current = 0
     /// Items this sync downloads.
     var pending = 0
+    /// Items this sync could not download.
+    var failed = 0
     var progress = SteamDownloadProgress()
 }
 
@@ -220,8 +222,9 @@ struct SteamWorkshopSection: View {
                 }
             case .done:
                 Text(state.subscribed == 0 ? "No subscribed items for this game."
-                     : "\(state.subscribed) subscribed item\(state.subscribed == 1 ? "" : "s"), all downloaded.")
-                    .foregroundStyle(.secondary)
+                     : state.failed == 0 ? "\(state.subscribed) subscribed item\(state.subscribed == 1 ? "" : "s"), all downloaded."
+                     : "\(state.installed) of \(state.subscribed) items downloaded. \(state.failed) could not be downloaded.")
+                    .foregroundStyle(state.failed == 0 ? Color.secondary : Color.orange)
                 Button("Sync now") { Task { await steam.syncWorkshop(appID) } }
             case .failed(let message):
                 Text(message).font(.callout).foregroundStyle(.orange)

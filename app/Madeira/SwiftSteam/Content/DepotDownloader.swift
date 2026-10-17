@@ -820,7 +820,13 @@ extension DepotDownloader {
         if let provider = contentHosts { hosts = try await provider(appID) } else { hosts = try await contentServers(appID: appID) }
         guard !hosts.isEmpty else { throw SteamError.chunkDownloadFailed("No content servers are available.") }
         let key = try await depotKey(depotID: depotID, appID: appID)
-        let manifest = try await fetchManifest(depotID: depotID, appID: appID, manifestGID: manifestGID, key: key, hosts: hosts)
+        let manifest: DepotManifest
+        do {
+            manifest = try await fetchManifest(depotID: depotID, appID: appID, manifestGID: manifestGID, key: key, hosts: hosts)
+        } catch {
+            SteamLog.event("[steam-workshop] manifest-failed app=\(appID) depot=\(depotID) manifest=\(manifestGID) detail=\(error.localizedDescription)")
+            throw error
+        }
         let pool = Array(hosts.prefix(hostPoolSize))
         var auth: [String: String] = [:]
         for host in pool { auth[host] = await cdnAuthFragment(depotID: depotID, appID: appID, host: host) }
