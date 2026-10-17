@@ -460,6 +460,7 @@ final class SteamOwnedLibrary: ObservableObject {
     /// Once per app run: syncs each installed Steam game, then says which
     /// games have saves that need a choice.
     private func auditCloudSaves() async {
+        defer { Task { await syncAllWorkshop() } }
         guard !cloudAudited, !inSession, Self.cloudEnabled else { return }
         cloudAudited = true
         let games = SteamGamesModel.shared.games.filter(\.installed).prefix(40)
@@ -467,6 +468,18 @@ final class SteamOwnedLibrary: ObservableObject {
         for game in games {
             guard !inSession else { break }
             await syncCloud(game.id)
+        }
+    }
+
+    /// Once per app run, after the cloud pass: each installed game's Workshop
+    /// subscriptions, so items are current without opening the game's page.
+    private var workshopAudited = false
+    private func syncAllWorkshop() async {
+        guard Self.workshopEnabled, !workshopAudited, !inSession else { return }
+        workshopAudited = true
+        for game in SteamGamesModel.shared.games.filter(\.installed).prefix(40) {
+            guard !inSession else { break }
+            await syncWorkshop(game.id)
         }
     }
 
@@ -992,14 +1005,27 @@ final class SteamOwnedLibrary: ObservableObject {
             }
             items = items.filter { $0.consumerAppID == 0 || $0.consumerAppID == app }
             var record = SteamWorkshop.readRecord(appID: app, steamApps: apps)
+            var layout = SteamWorkshop.readLayout(appID: app, steamApps: apps)
             let wanted = Set(items.map(\.id))
+            if items.isEmpty && !record.isEmpty {
+                // An empty answer while items are installed is more likely a
+                // connection that was not ready than unsubscribing from all of
+                // them: nothing is removed on it.
+                SteamLog.event("[steam-workshop] app=\(appID) empty list with \(record.count) installed: kept")
+                state.phase = .done
+                workshop[appID] = state
+                return
+            }
             for gone in record.keys where !wanted.contains(gone) {
                 record[gone] = nil
+                layout.remove(gone)
                 try? FileManager.default.removeItem(at: SteamWorkshop.itemFolder(appID: app, item: gone, steamApps: apps))
             }
             let stale = items.filter { item in
                 guard item.downloadable else { return false }
                 guard let have = record[item.id] else { return true }
+                // Laid out by an earlier version: a single-file item may sit under its plain name.
+                if !layout.contains(item.id) && item.fileURL.hasPrefix("https://") { return true }
                 return have.manifest != item.manifest || have.timeUpdated < item.timeUpdated
                     || !FileManager.default.fileExists(atPath: SteamWorkshop.itemFolder(appID: app, item: item.id, steamApps: apps).path)
             }
@@ -1030,15 +1056,19 @@ final class SteamOwnedLibrary: ObservableObject {
                         } catch let error where !(error is CancellationError) && item.fileURL.hasPrefix("https://") {
                             // Some items list both; the single file is the fallback.
                             SteamLog.event("[steam-workshop] app=\(appID) item=\(item.id) depot-failed reason=\(Self.reason(error)) trying=file")
+                            try? FileManager.default.removeItem(at: folder)
                             size = try await downloader.downloadWorkshopFile(
-                                item.fileURL, to: folder.appendingPathComponent(SteamWorkshop.safeFileName(item.fileName, item: item.id)))
+                                item.fileURL, to: folder.appendingPathComponent(SteamWorkshop.legacyFileName(item.fileName, item: item.id)))
                         }
                     } else {
-                        let name = SteamWorkshop.safeFileName(item.fileName, item: item.id)
+                        try? FileManager.default.removeItem(at: folder)
+                        let name = SteamWorkshop.legacyFileName(item.fileName, item: item.id)
                         size = try await downloader.downloadWorkshopFile(item.fileURL, to: folder.appendingPathComponent(name))
                     }
                     record[item.id] = SteamWorkshop.Installed(size: size, timeUpdated: item.timeUpdated, manifest: item.manifest)
                     try SteamWorkshop.writeRecord(appID: app, steamApps: apps, accountID: accountID, items: record)
+                    layout.insert(item.id)
+                    SteamWorkshop.writeLayout(layout, appID: app, steamApps: apps)
                     state.installed += 1
                     SteamLog.event("[steam-workshop] app=\(appID) item=\(item.id) kind=\(kind) bytes=\(size)")
                 } catch is CancellationError {

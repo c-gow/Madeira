@@ -101,6 +101,30 @@ enum SteamWorkshop {
         workshop(steamApps: steamApps).appendingPathComponent("appworkshop_\(appID).acf")
     }
 
+    /// Where Valve's client keeps an old-style (single file) item: the file's
+    /// name without its extension, plus "_legacy.bin". Garry's Mod looks the
+    /// item up by that name and reports it missing under any other.
+    static func legacyFileName(_ name: String, item: UInt64) -> String {
+        let safe = safeFileName(name, item: item)
+        let stem = (safe as NSString).deletingPathExtension
+        return (stem.isEmpty ? "\(item)" : stem) + "_legacy.bin"
+    }
+
+    /// Items laid out by this version (old-style items under their
+    /// _legacy.bin name), kept beside Valve's record. An item missing from it
+    /// that has a single file is checked once more.
+    static func layoutURL(appID: UInt32, steamApps: URL) -> URL {
+        workshop(steamApps: steamApps).appendingPathComponent("appworkshop_\(appID).madeira")
+    }
+    static func readLayout(appID: UInt32, steamApps: URL) -> Set<UInt64> {
+        guard let text = try? String(contentsOf: layoutURL(appID: appID, steamApps: steamApps), encoding: .utf8) else { return [] }
+        return Set(text.split(whereSeparator: \.isNewline).compactMap { UInt64($0) })
+    }
+    static func writeLayout(_ ids: Set<UInt64>, appID: UInt32, steamApps: URL) {
+        let text = ids.sorted().map(String.init).joined(separator: "\n") + "\n"
+        try? Data(text.utf8).write(to: layoutURL(appID: appID, steamApps: steamApps), options: .atomic)
+    }
+
     /// A legacy item's file name, reduced to one safe path component.
     static func safeFileName(_ name: String, item: UInt64) -> String {
         let last = name.split(whereSeparator: { $0 == "/" || $0 == "\\" }).last.map(String.init) ?? ""
