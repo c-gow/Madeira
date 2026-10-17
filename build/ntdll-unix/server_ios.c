@@ -5558,14 +5558,20 @@ void server_init_process_done(void)
 
     assert( !status );
 #ifdef WINE_IOS
-    /* On iOS, the parent's PE code (CreateProcessInternalW) should call
-     * NtResumeThread to unsuspend the child. But since we use thread-based
-     * CreateProcess, the resume mechanism may not work correctly.
-     * Force suspend=0 so the child proceeds immediately. */
+    /* A child created with CREATE_SUSPENDED waits in init_syscall_frame's
+     * wait_suspend() until its parent resumes it, as on Windows. Chromium's
+     * sandbox broker (GMod's CEF helpers) sets the target up while it is paused
+     * and kills a target that is already running. MADEIRA_IGNORE_SUSPEND=1
+     * restores the old behaviour of starting such a child at once. */
     if (suspend)
     {
-        dprintf(STDERR_FILENO, "[Wine init_done] overriding suspend=%d → 0 for iOS\n", suspend);
-        suspend = 0;
+        const char *ign = getenv( "MADEIRA_IGNORE_SUSPEND" );
+        if (ign && ign[0] == '1')
+        {
+            dprintf(STDERR_FILENO, "[Wine init_done] overriding suspend=%d → 0 (MADEIRA_IGNORE_SUSPEND)\n", suspend);
+            suspend = 0;
+        }
+        else dprintf(STDERR_FILENO, "[Wine init_done] created suspended; waiting for the parent's resume\n");
     }
     {
         extern void *pLdrInitializeThunk;
