@@ -1,0 +1,18 @@
+diff --git a/dlls/wow64/security.c b/dlls/wow64/security.c
+index 99c585d5997..2881fa4a8b8 100644
+--- a/dlls/wow64/security.c
++++ b/dlls/wow64/security.c
+@@ -474,6 +474,13 @@ NTSTATUS WINAPI wow64_NtQueryInformationToken( UINT *args )
+         status = NtQueryInformationToken( handle, class, &buffer, sizeof(buffer), &ret_size );
+         if (status) return status;
+         sid = owner->Owner;
++        if (!sid)  /* TokenAppContainerSid of a token that is not an app container */
++        {
++            if (len >= sizeof(*owner32)) owner32->Owner = 0;
++            else status = STATUS_BUFFER_TOO_SMALL;
++            if (retlen) *retlen = sizeof(*owner32);
++            return status;
++        }
+         sid_len = offsetof( SID, SubAuthority[sid->SubAuthorityCount] );
+         if (len >= sizeof(*owner32) + sid_len)
+         {

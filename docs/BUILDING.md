@@ -76,6 +76,8 @@ git-ignored and consumed by the app project.
    -> `app/Madeira/i386-windows/`), `build/fex-wow64/build.sh` (FEX WOW64 module
    -> `app/Madeira/aarch64-windows/xtajit.dll`) and the aarch64 `wow64.dll` /
    `wow64win.dll`; see docs/WOW64.md, "Building". UNVERIFIED on macOS.
+   The tracked `wow64.dll` is built with `patches/wine-wow64-appcontainer-sid.patch`
+   applied (`git -C wine apply ../patches/wine-wow64-appcontainer-sid.patch`).
 
 ## Status of the LGPL relink question
 
