@@ -21190,6 +21190,40 @@ static void ios_swap_image_flush( int ok )
     }
 }
 
+/* Zero a decommitted range without faulting. decommit_pages runs with
+ * virtual_mutex held, and a fault here goes to the Mach exception thread, which
+ * takes virtual_mutex too: the thread deadlocks against itself and every process
+ * stops in its next virtual memory call. Only the writable parts are zeroed; a
+ * host page that is not writable now (a swap placeholder, a guard) is left alone. */
+static void ios_decommit_zero( void *addr, size_t size )
+{
+    mach_vm_address_t cur = (mach_vm_address_t)addr, end = cur + size;
+
+    while (cur < end)
+    {
+        mach_vm_address_t r = cur;
+        mach_vm_size_t rsize;
+        vm_region_basic_info_data_64_t info;
+        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t obj;
+        mach_vm_address_t stop;
+
+        if (mach_vm_region( mach_task_self(), &r, &rsize, VM_REGION_BASIC_INFO_64,
+                            (vm_region_info_t)&info, &count, &obj ) != KERN_SUCCESS || r >= end) break;
+        if (r > cur) cur = r;   /* a hole: nothing mapped, nothing to zero */
+        stop = r + rsize < end ? r + rsize : end;
+        if (info.protection & VM_PROT_WRITE) memset( (void *)cur, 0, stop - cur );
+        else
+        {
+            static LONG logs;
+            if (InterlockedIncrement( &logs ) <= 16)
+                dprintf( 2, "[decommit-zero] skipped non-writable 0x%llx+0x%llx (prot=%d)\n",
+                         (unsigned long long)cur, (unsigned long long)(stop - cur), info.protection );
+        }
+        cur = stop;
+    }
+}
+
 static NTSTATUS decommit_pages( struct file_view *view, char *base, size_t size )
 {
     char *host_end, *host_start = (char *)ROUND_SIZE( 0, base, host_page_mask );
@@ -21275,7 +21309,7 @@ static NTSTATUS decommit_pages( struct file_view *view, char *base, size_t size 
             }
             else
             {
-                memset( (void *)rw_alias, 0, size );
+                ios_decommit_zero( (void *)rw_alias, size );
                 dc_branch = "alias-memset";
                 dc_verify = (const void *)rw_alias;
                 dc_vsize  = size;
@@ -21297,14 +21331,14 @@ static NTSTATUS decommit_pages( struct file_view *view, char *base, size_t size 
              * couldn't cover — FEX relies on decommit-as-bzero, and stale
              * LookupCache entries surviving at the edges would run wrong
              * blocks. Edge pages belong to the same committed RW guest heap. */
-            if ((char *)base < host_start) memset( base, 0, host_start - (char *)base );
-            if (host_end < (char *)base + size) memset( host_end, 0, (char *)base + size - host_end );
+            if ((char *)base < host_start) ios_decommit_zero( base, host_start - (char *)base );
+            if (host_end < (char *)base + size) ios_decommit_zero( host_end, (char *)base + size - host_end );
         }
         else
         {
             /* Range lies within a single host page — no full page to remap;
              * zero it in place to honour the decommit-as-bzero contract. */
-            memset( base, 0, size );
+            ios_decommit_zero( base, size );
             dc_branch = "subpage-memset";
             dc_verify = base;
             dc_vsize  = size;
