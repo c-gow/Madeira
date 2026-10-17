@@ -3554,7 +3554,9 @@ static __thread int ios_child_boot_held;
 static void ios_child_boot_key_dtor( void *held )
 {
     if (!held) return;
-    dprintf( STDERR_FILENO, "[Wine child] ml1213: a booting child exited holding the boot lock; released\n" );
+    /* The value is the boot stage reached (a string literal), or 1 before the first. */
+    dprintf( STDERR_FILENO, "[Wine child] ml1213: a booting child exited holding the boot lock at stage '%s'; released\n",
+             held == (void *)1 ? "start" : (const char *)held );
     pthread_mutex_unlock( &ios_child_boot_mutex );
 }
 
@@ -3570,6 +3572,13 @@ void ios_child_boot_unlock( void )
     ios_child_boot_held = 0;
     if (ios_child_boot_key_ok) pthread_setspecific( ios_child_boot_key, NULL );
     pthread_mutex_unlock( &ios_child_boot_mutex );
+}
+
+/* Records the stage in the key too, so a boot that ends through pthread_exit
+ * says how far it got. */
+static void ios_child_boot_note_stage( const char *stage )
+{
+    if (ios_child_boot_held && ios_child_boot_key_ok) pthread_setspecific( ios_child_boot_key, (void *)stage );
 }
 
 static void ios_child_boot_lock( const char *who )
@@ -3625,7 +3634,7 @@ DECLSPEC_EXPORT void wine_ios_child_main( int argc, char *argv[], int child_fd_s
      * so a child that died during bring-up produced no ERR at all and the
      * parent simply never saw a process appear.  CHILD_STAGE() names the stage
      * the child is in; CHILD_BOOT_FAIL() is the single exit that reports it. */
-#define CHILD_STAGE(s)  (ios_child_boot_stage = (s))
+#define CHILD_STAGE(s)  (ios_child_boot_stage = (s), ios_child_boot_note_stage( s ))
 #define CHILD_BOOT_FAIL(fmt, ...)                                                       \
     do {                                                                                \
         dprintf( STDERR_FILENO, "[Wine child] BOOT FAILED at stage '%s': " fmt,          \

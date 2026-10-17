@@ -11147,10 +11147,37 @@ NTSTATUS ios_wow_window_reserve(void)
     ios_wow_reclaim_dead_windows();
 
     pthread_mutex_lock( &ios_wow_mutex );
-    if (ios_wow_slot_current())
+    /* Only a window this boot thread reserved itself counts as "already have
+     * one". ios_wow_slot_current() also resolves through the current PEB, and
+     * a booting child has none of its own yet: it resolves to the global peb,
+     * which still names the last child booted. When that child was killed by
+     * another process (Chromium ending a crashed GPU process), its window was
+     * never released, and the next child booted inside the dead one's window:
+     * its i386 ntdll landed at another guest address, and the session's other
+     * 32-bit process then jumped into it and faulted without end. */
+    /* A window this thread reserved but has not bound yet. One already bound to
+     * a PEB belongs to an earlier process whose boot thread had the same
+     * pthread_t (they are reused once a thread ends): it stops matching this
+     * thread at all. */
+    for (i = 0; i < ios_wow_window_count; i++)
+        if (ios_wow_windows[i].base && !ios_wow_windows[i].leaked && !ios_wow_windows[i].dead &&
+            pthread_equal( ios_wow_windows[i].owner, pthread_self() ))
+        {
+            if (!ios_wow_windows[i].peb)
+            {
+                pthread_mutex_unlock( &ios_wow_mutex );
+                return STATUS_SUCCESS;   /* already have one */
+            }
+            dprintf( 2, "[wow-window] slot %d B=%p bound to peb=%p of an earlier process on a reused "
+                        "thread id: not this child's\n", (int)i, (void *)ios_wow_windows[i].base,
+                     ios_wow_windows[i].peb );
+            memset( &ios_wow_windows[i].owner, 0, sizeof(ios_wow_windows[i].owner) );
+        }
+    if ((slot = ios_wow_slot_current()))
     {
-        pthread_mutex_unlock( &ios_wow_mutex );
-        return STATUS_SUCCESS;   /* already have one */
+        dprintf( 2, "[wow-window] slot %d B=%p resolved through peb=%p, not this thread's: "
+                    "reserving a new window\n", (int)(slot - ios_wow_windows), (void *)slot->base, slot->peb );
+        slot = NULL;
     }
     for (i = 0; i < IOS_WOW_MAX_WINDOWS; i++)
     {

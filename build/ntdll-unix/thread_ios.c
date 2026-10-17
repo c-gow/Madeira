@@ -1832,6 +1832,10 @@ done:
  */
 void abort_thread( int status )
 {
+    /* Who ended the thread: with abort_thread's own address the caller can be
+     * looked up in the app binary despite ASLR. */
+    dprintf( 2, "[thr-abort] status=%d caller=%p abort_thread=%p\n",
+             status, __builtin_return_address( 0 ), (void *)abort_thread );
     pthread_sigmask( SIG_BLOCK, &server_block_set, NULL );
     if (InterlockedDecrement( &nb_threads ) <= 0) abort_process( status );
     pthread_exit_wrapper( status );
