@@ -375,7 +375,7 @@ enum SteamDirectStart {
             let found = MadeiraDock.games(drive: drive)
             var builds: [Int: Int] = [:]
             for game in found where SteamInstallPaths.isManaged(library: game.library) && game.installed {
-                if let build = SteamInstallFiles.buildID(appID: game.id, steamApps: SteamInstallPaths.steamApps(drive: drive)) {
+                if let build = SteamInstallFiles.buildID(appID: game.id, steamApps: drive.appendingPathComponent(game.library, isDirectory: true)) {
                     builds[game.id] = build
                 }
             }

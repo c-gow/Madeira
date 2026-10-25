@@ -229,7 +229,10 @@ final class SteamOwnedLibrary: ObservableObject {
     // MARK: Files
 
     static var drive: URL { MadeiraDock.drive }
-    static var steamApps: URL { SteamInstallPaths.steamApps(drive: drive) }
+    /// The library downloads go to: drive_c's own, or the external drive picked
+    /// in Settings › External drives.
+    static var installLibrary: String { ExternalDrives.steamInstallLibrary ?? SteamInstallPaths.libraryRelative }
+    static var steamApps: URL { drive.appendingPathComponent(installLibrary, isDirectory: true) }
     private static var supportFolder: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return base.appendingPathComponent("Madeira", isDirectory: true)
@@ -1026,7 +1029,7 @@ final class SteamOwnedLibrary: ObservableObject {
         LibraryModel.shared.removeSteam(appID: game.id)
         // A reinstall evaluates the game's one-time installs again.
         DockInstallers.setRunsNext(game.id, true, prefix: MadeiraDock.prefix)
-        let apps = Self.steamApps, id = game.id, folder = game.installDir
+        let apps = Self.drive.appendingPathComponent(game.library, isDirectory: true), id = game.id, folder = game.installDir
         Task.detached(priority: .utility) {
             SteamInstallFiles.delete(appID: id, folderName: folder, steamApps: apps)
             await MainActor.run { SteamGamesModel.shared.refresh() }
@@ -1052,8 +1055,10 @@ final class SteamOwnedLibrary: ObservableObject {
             guard let info = try await fetcher.fetchInstallInfo(appID: UInt32(appID)) else {
                 throw SteamError.appInfoNotFound(UInt32(appID))
             }
-            try FileManager.default.createDirectory(at: SteamInstallPaths.common(drive: Self.drive), withIntermediateDirectories: true)
-            let folder = try await downloader.install(info, steamApps: Self.steamApps,
+            let library = Self.installLibrary, steamApps = Self.drive.appendingPathComponent(library, isDirectory: true)
+            try FileManager.default.createDirectory(at: steamApps.appendingPathComponent("common", isDirectory: true), withIntermediateDirectories: true)
+            SteamLog.event("[steam-depot] install app=\(appID) library=\(library)")
+            let folder = try await downloader.install(info, steamApps: steamApps,
                                                       ownedDepots: { [weak self] in try? await self?.fetcher.ownedDepotIDs() }) { [weak self] progress in
                 self?.downloads[appID]?.progress = progress
                 SteamDownloadBackground.shared.progress(progress)
@@ -1062,7 +1067,7 @@ final class SteamOwnedLibrary: ObservableObject {
             // The install record is written last: the game is now "installed" for Dock, and it
             // gets its library entry (its Game details page and settings; an existing one is kept).
             LibraryModel.shared.upsertSteam(DockGame(id: appID, name: info.name, installDir: folder.lastPathComponent,
-                                                     library: SteamInstallPaths.libraryRelative, installed: true,
+                                                     library: library, installed: true,
                                                      customExecutables: false), title: info.name)
             SteamLog.event("[steam-depot] library entry app=\(appID)")
             SteamGamesModel.shared.refresh()
