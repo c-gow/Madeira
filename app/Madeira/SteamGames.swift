@@ -917,8 +917,7 @@ struct SteamGameSheet: View {
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
             .task(id: steam.downloads[appID]?.state) {
                 partial = steam.hasPartialDownload(appID)
-                let values = try? SteamOwnedLibrary.steamApps.resolvingSymlinksInPath().resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-                freeSpace = values?.volumeAvailableCapacityForImportantUsage
+                freeSpace = SteamOwnedLibrary.steamApps.freeSpace
             }
             .confirmationDialog("Cancel this download? Downloaded files are deleted.", isPresented: $confirmCancel, titleVisibility: .visible) {
                 Button("Cancel download", role: .destructive) {
@@ -1257,8 +1256,7 @@ struct SteamEntrySection: View {
         }
         .onAppear { dock.refresh(); games.refresh() }
         .task(id: download?.state) {
-            let values = try? SteamOwnedLibrary.steamApps.resolvingSymlinksInPath().resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-            freeSpace = values?.volumeAvailableCapacityForImportantUsage
+            freeSpace = SteamOwnedLibrary.steamApps.freeSpace
         }
         .task(id: "\(entry.steamStart ?? "dock") \(installed?.installed == true) \(download == nil)") { await resolveProgram() }
         .confirmationDialog("Uninstall \(entry.title)? Its downloaded files are deleted from this device. Saves stored elsewhere are kept.",
