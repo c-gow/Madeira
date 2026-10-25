@@ -13,6 +13,7 @@ struct MadeiraApp: App {
             ContentView()
                 .modifier(ClaimGamepadEvents())
                 .onAppear {
+                    ExternalDrives.shared.mountAll()
                     GamepadInput.shared.start()
                     HardwareInput.shared.start()
                     JITNetworkShortcut.shared.restoreLeftover()   // also starts its network path monitor
