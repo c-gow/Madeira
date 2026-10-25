@@ -34,9 +34,12 @@ final class ExternalDrives: ObservableObject {
     private static let lock = NSLock()
     private static var libraries: [String] = []
     private static var installTarget: String?
+    private static var installMissing: String?
     static var steamLibraries: [String] { lock.lock(); defer { lock.unlock() }; return libraries }
     /// The library Madeira's Steam downloads go to, or nil for drive_c's own.
     static var steamInstallLibrary: String? { lock.lock(); defer { lock.unlock() }; return installTarget }
+    /// The name of the drive Steam downloads go to when it is not connected.
+    static var steamInstallMissing: String? { lock.lock(); defer { lock.unlock() }; return installMissing }
     /// Where Steam libraries are looked for inside a picked folder.
     private static let libraryFolders = ["", "SteamLibrary", "Steam", "Program Files (x86)/Steam", "Program Files/Steam"]
 
@@ -80,9 +83,12 @@ final class ExternalDrives: ObservableObject {
     /// Valve's client (started by Madeira Dock) can start their games.
     func refreshSteam() {
         let fm = FileManager.default
-        var found: [String] = [], target: String?
+        var found: [String] = [], target: String?, missing: String?
         for folder in folders {
-            guard let url = mounted[folder.id] else { continue }
+            guard let url = mounted[folder.id] else {
+                if folder.steamInstalls == true { missing = folder.name }
+                continue
+            }
             if folder.steamInstalls == true {
                 try? fm.createDirectory(at: url.appendingPathComponent("SteamLibrary/steamapps/common", isDirectory: true), withIntermediateDirectories: true)
                 target = "External/\(folder.name)/SteamLibrary/steamapps"
@@ -95,7 +101,7 @@ final class ExternalDrives: ObservableObject {
                 }
             }
         }
-        Self.lock.lock(); Self.libraries = found; Self.installTarget = target; Self.lock.unlock()
+        Self.lock.lock(); Self.libraries = found; Self.installTarget = target; Self.installMissing = missing; Self.lock.unlock()
         Self.listInSteamClient(found.map { String($0.dropLast("/steamapps".count)) })
         LogStore.shared.log("[external] steam libraries=\(found.count) install=\(target ?? "drive_c")")
     }
@@ -157,12 +163,21 @@ final class ExternalDrives: ObservableObject {
         LogStore.shared.log("[external] added \(letter.uppercased()): \(name) -> \(url.path)")
     }
 
+    /// Forgets a folder. Its files stay on the drive; the library entries that
+    /// start programs on it (and its Steam games' entries) are removed.
     func remove(_ id: UUID) {
         guard let folder = folders.first(where: { $0.id == id }) else { return }
+        let prefix = "External/\(folder.name)/"
+        let library = LibraryModel.shared
+        for entry in library.entries where entry.relativePath.hasPrefix(prefix) {
+            if let appID = entry.steamAppID { library.removeSteam(appID: appID) } else { library.remove(entry.id) }
+        }
         unlink(folder)
         mounted.removeValue(forKey: id)?.stopAccessingSecurityScopedResource()
         folders.removeAll { $0.id == id }; save()
         refreshSteam()
+        Task { @MainActor in SteamGamesModel.shared.refresh() }
+        LogStore.shared.log("[external] removed \(folder.name)")
     }
 
     private func link(_ folder: ExternalFolder, to url: URL) {
@@ -194,29 +209,37 @@ enum ExternalGameScan {
     private static let skipNames = ["unins", "setup", "install", "redist", "vcredist", "vc_redist", "dxsetup", "directx",
                                     "dotnet", "crash", "report", "update", "patch", "launcherhelper", "helper", "cef",
                                     "touchup", "easyanticheat", "battleye", "ue4prereq", "prereq", "config", "settings"]
-    private static let skipFolders: Set<String> = ["steamapps", "steamlibrary", "steam", "_commonredist", "commonredist", "redist",
-                                                   "redistributables", "directx", "dotnet", "vcredist", "support", "__installer",
-                                                   "windows", "system32", "$recycle.bin", "engine"]
+    private static let skipFolders: Set<String> = ["steamapps", "_commonredist", "commonredist", "redist",
+                                                   "redistributables", "directx", "dotnet", "vcredist", "__installer", "windows", "system32",
+                                                   "$recycle.bin", "system volume information", "engine", "node_modules"]
 
-    /// Folder name relative to the root, with the programs found in it.
-    static func scan(_ root: URL, depth: Int = 3) -> [URL] {
-        var found: [URL] = []
-        walk(root, depth: depth, into: &found)
+    /// Every subfolder is searched, within a budget of folders and time so a
+    /// huge drive still returns.
+    static func scan(_ root: URL) -> [URL] {
+        var found: [URL] = [], budget = Budget()
+        walk(root, depth: 40, into: &found, budget: &budget)
         return found
     }
 
-    private static func walk(_ folder: URL, depth: Int, into found: inout [URL]) {
-        guard found.count < 500, let items = try? FileManager.default.contentsOfDirectory(
+    private struct Budget { var folders = 0; let deadline = Date().addingTimeInterval(20) }
+
+    private static func walk(_ folder: URL, depth: Int, into found: inout [URL], budget: inout Budget) {
+        budget.folders += 1
+        guard found.count < 1000, budget.folders < 50_000, Date() < budget.deadline, let items = try? FileManager.default.contentsOfDirectory(
             at: folder, includingPropertiesForKeys: [.isDirectoryKey], options: .skipsHiddenFiles) else { return }
         for item in items.sorted(by: { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }) {
             let name = item.lastPathComponent.lowercased()
             if (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
-                if depth > 0, !skipFolders.contains(name) { walk(item, depth: depth - 1, into: &found) }
+                if depth > 0, !skipFolders.contains(name), !item.isSymlink { walk(item, depth: depth - 1, into: &found, budget: &budget) }
             } else if item.pathExtension.lowercased() == "exe", !skipNames.contains(where: { name.hasPrefix($0) || name.contains("_" + $0) || name.contains("-" + $0) }) {
                 found.append(item)
             }
         }
     }
+}
+
+private extension URL {
+    var isSymlink: Bool { (try? resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true }
 }
 
 /// Lists the games found on one external folder and adds the chosen ones.
@@ -293,6 +316,7 @@ struct ExternalDrivesSection: View {
     @State private var picking = false
     @State private var error: String?
     @State private var scanning: ExternalFolder?
+    @State private var removing: ExternalFolder?
 
     var body: some View {
         Section {
@@ -307,6 +331,7 @@ struct ExternalDrivesSection: View {
                 if drives.mounted[folder.id] != nil {
                     Button("Find games on \(folder.name)") { scanning = folder }
                 }
+                Button("Remove \(folder.name)", role: .destructive) { removing = folder }
             }
             Button("Add drive or folder") { picking = true }
             if !drives.folders.isEmpty {
@@ -328,6 +353,12 @@ struct ExternalDrivesSection: View {
                 // Offer the games already on it.
                 scanning = drives.folders.last
             } catch { self.error = error.localizedDescription }
+        }
+        .confirmationDialog("Remove \(removing?.name ?? "")?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
+                            titleVisibility: .visible, presenting: removing) { folder in
+            Button("Remove", role: .destructive) { drives.remove(folder.id) }
+        } message: { _ in
+            Text("Madeira forgets this drive and removes its games from the library. The files on the drive are kept.")
         }
         .sheet(item: $scanning) { folder in
             if let root = drives.mounted[folder.id] { ExternalGamesSheet(folder: folder, root: root.resolvingSymlinksInPath()) }

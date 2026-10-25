@@ -1052,6 +1052,10 @@ final class SteamOwnedLibrary: ObservableObject {
     private func run(_ appID: Int) async {
         var outcome = SteamDownloadBackground.Outcome.paused
         do {
+            // The chosen drive is unplugged: fail rather than fill this device.
+            if let missing = ExternalDrives.steamInstallMissing {
+                throw SteamDriveMissing(name: missing)
+            }
             guard let info = try await fetcher.fetchInstallInfo(appID: UInt32(appID)) else {
                 throw SteamError.appInfoNotFound(UInt32(appID))
             }
@@ -1080,6 +1084,11 @@ final class SteamOwnedLibrary: ObservableObject {
                 downloads[appID]?.state = .failed(SteamSignIn.message(error))
                 handleSessionError(error, context: "depot")
                 outcome = .failed(SteamSignIn.message(error))
+            } else if let missing = error as? SteamDriveMissing {
+                let message = "\(missing.name) is not connected. Plug it in and restart Madeira, or choose This iPhone under Settings › External drives."
+                downloads[appID]?.state = .failed(message)
+                SteamLog.event("[steam-depot] failed app=\(appID) reason=drive-missing")
+                outcome = .failed(message)
             } else {
                 downloads[appID]?.state = .failed(SteamSignIn.message(error))
                 SteamLog.event("[steam-depot] failed app=\(appID) reason=\(Self.reason(error))")
@@ -1112,3 +1121,6 @@ final class SteamOwnedLibrary: ObservableObject {
         }
     }
 }
+
+/// The external drive Steam downloads go to is not connected.
+struct SteamDriveMissing: Error { let name: String }
