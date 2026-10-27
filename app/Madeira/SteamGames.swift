@@ -375,7 +375,7 @@ enum SteamDirectStart {
             let found = MadeiraDock.games(drive: drive)
             var builds: [Int: Int] = [:]
             for game in found where SteamInstallPaths.isManaged(library: game.library) && game.installed {
-                if let build = SteamInstallFiles.buildID(appID: game.id, steamApps: SteamInstallPaths.steamApps(drive: drive)) {
+                if let build = SteamInstallFiles.buildID(appID: game.id, steamApps: drive.appendingPathComponent(game.library, isDirectory: true)) {
                     builds[game.id] = build
                 }
             }
@@ -863,6 +863,9 @@ struct SteamGameSheet: View {
     @State private var freeSpace: Int64?
     @State private var partial = false
     @State private var confirmCancel = false
+    @ObservedObject private var drives = ExternalDrives.shared
+    /// Where a new download goes (Install on); the setting's choice by default.
+    @State private var target: String?
 
     var body: some View {
         let owned = SteamOwnedLibrary.enabled ? steam.owned : []
@@ -899,7 +902,14 @@ struct SteamGameSheet: View {
                         }
                     }
                     Section {
-                        if let freeSpace { LabeledContent("Free space on this device", value: formatBytes(freeSpace)) }
+                        let choices = drives.steamTargets
+                        if choices.count > 1, item.owned != nil, !games.games.contains(where: { $0.id == appID }) {
+                            Picker("Install on", selection: Binding(get: { target ?? steam.library(for: appID) }, set: { target = $0 })) {
+                                ForEach(choices, id: \.library) { Text($0.name).tag($0.library) }
+                            }
+                            .disabled(steam.downloads[appID] != nil || partial)
+                        }
+                        if let freeSpace { LabeledContent("Free space there", value: formatBytes(freeSpace)) }
                         Text(SteamGameSheet.downloadNote)
                             .font(.footnote).foregroundStyle(.secondary)
                     }
@@ -915,10 +925,9 @@ struct SteamGameSheet: View {
             }
             .navigationTitle("Steam").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
-            .task(id: steam.downloads[appID]?.state) {
+            .task(id: "\(String(describing: steam.downloads[appID]?.state))\(target ?? "")") {
                 partial = steam.hasPartialDownload(appID)
-                let values = try? URL.documentsDirectory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-                freeSpace = values?.volumeAvailableCapacityForImportantUsage
+                freeSpace = SteamOwnedLibrary.drive.appendingPathComponent(target ?? steam.library(for: appID)).freeSpace
             }
             .confirmationDialog("Cancel this download? Downloaded files are deleted.", isPresented: $confirmCancel, titleVisibility: .visible) {
                 Button("Cancel download", role: .destructive) {
@@ -929,7 +938,7 @@ struct SteamGameSheet: View {
         }
     }
 
-    static let downloadNote = "Games download directly from Steam with your account into C:\\Program Files (x86)\\Steam\\steamapps\\common. You can leave Madeira while it downloads: on iOS 26 and later iOS shows the download's progress and keeps it going; on earlier versions it pauses after a short while and continues when you return. A download pauses while a game is running and continues afterwards."
+    static let downloadNote = "Games download directly from Steam with your account, to this iPhone or to the drive picked under Install on. You can leave Madeira while it downloads: on iOS 26 and later iOS shows the download's progress and keeps it going; on earlier versions it pauses after a short while and continues when you return. A download pauses while a game is running and continues afterwards."
 
     @ViewBuilder private func primaryAction(_ item: SteamGamesRules.Item) -> some View {
         if let installed = item.installed {
@@ -953,7 +962,7 @@ struct SteamGameSheet: View {
                     .buttonStyle(.borderedProminent)
             }
         } else if item.owned != nil {
-            Button { steam.install(appID) } label: {
+            Button { steam.install(appID, library: partial ? nil : target) } label: {
                 steamActionLabel(partial ? "Resume download" : "Install", symbol: "arrow.down.circle.fill")
             }.buttonStyle(.borderedProminent).disabled(!steam.signedIn)
         }
@@ -1236,7 +1245,7 @@ struct SteamEntrySection: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             LabeledContent("App ID", value: String(appID))
-            if let freeSpace { LabeledContent("Free space on this device", value: formatBytes(freeSpace)) }
+            if let freeSpace { LabeledContent("Free space where the game is installed", value: formatBytes(freeSpace)) }
             if let status = dock.status {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Last Dock result").font(.caption).foregroundStyle(.secondary)
@@ -1256,12 +1265,11 @@ struct SteamEntrySection: View {
             }
         }
         .onAppear { dock.refresh(); games.refresh() }
-        .task(id: download?.state) {
-            let values = try? URL.documentsDirectory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-            freeSpace = values?.volumeAvailableCapacityForImportantUsage
+        .task(id: "\(String(describing: download?.state)) \(installed?.library ?? "")") {
+            freeSpace = SteamOwnedLibrary.drive.appendingPathComponent(installed?.library ?? steam.library(for: appID)).freeSpace
         }
         .task(id: "\(entry.steamStart ?? "dock") \(installed?.installed == true) \(download == nil)") { await resolveProgram() }
-        .confirmationDialog("Uninstall \(entry.title)? Its downloaded files are deleted from this device. Saves stored elsewhere are kept.",
+        .confirmationDialog("Uninstall \(entry.title)? Its downloaded files are deleted from where it is installed. Saves stored elsewhere are kept.",
                             isPresented: $confirmUninstall, titleVisibility: .visible) {
             Button("Uninstall", role: .destructive) {
                 if let installed { steam.uninstall(installed) }

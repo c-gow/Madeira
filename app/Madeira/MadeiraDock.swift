@@ -106,10 +106,17 @@ enum MadeiraDock {
                 if !libraries.contains(where: { $0.caseInsensitiveCompare(relative) == .orderedSame }) { libraries.append(relative) }
             }
         }
+        // Libraries on external drives (ExternalDrives.swift). They are reached
+        // through drive_c/External/<name> links, so they resolve outside drive_c.
+        let external = ExternalDrives.steamLibraries
+        for library in external where !libraries.contains(where: { $0.caseInsensitiveCompare(library) == .orderedSame }) {
+            libraries.append(library)
+        }
         var result: [DockGame] = []
-        for library in libraries.prefix(16) {
+        for library in libraries.prefix(32) {
             let folder = drive.appendingPathComponent(library, isDirectory: true)
-            guard folder.resolvingSymlinksInPath().path.hasPrefix(drive.resolvingSymlinksInPath().path + "/"),
+            let isExternal = external.contains { $0.caseInsensitiveCompare(library) == .orderedSame }
+            guard isExternal || folder.resolvingSymlinksInPath().path.hasPrefix(drive.resolvingSymlinksInPath().path + "/"),
                   let names = try? fm.contentsOfDirectory(atPath: folder.path) else { continue }
             for file in names.sorted().prefix(2000) where file.hasPrefix("appmanifest_") && file.hasSuffix(".acf") {
                 guard let data = try? Data(contentsOf: folder.appendingPathComponent(file)),
