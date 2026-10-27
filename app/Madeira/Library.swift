@@ -3133,6 +3133,7 @@ struct LibraryDetail: View {
                         Text("In the Shortcuts app: new shortcut, Open URLs, paste the link, then Share › Add to Home Screen.")
                     }
                 }
+                if entry.desktop != true, model.entries.contains(where: { $0.id == entry.id }) { GameMoveSection(entry: $entry) }
                 if entry.steamAppID != nil {
                     Section {
                         Text(entry.launchWindowsPath).font(.caption.monospaced()).textSelection(.enabled)

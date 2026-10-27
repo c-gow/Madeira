@@ -233,6 +233,18 @@ final class SteamOwnedLibrary: ObservableObject {
     /// in Settings › External drives.
     static var installLibrary: String { ExternalDrives.steamInstallLibrary ?? SteamInstallPaths.libraryRelative }
     static var steamApps: URL { drive.appendingPathComponent(installLibrary, isDirectory: true) }
+    /// Library chosen for one download (the install sheet's Install on), kept
+    /// until it finishes or is cancelled so a resume continues in the same place.
+    private static let targetsKey = "steam-install-targets"
+    private var targets: [Int: String] = (UserDefaults.standard.dictionary(forKey: "steam-install-targets") as? [String: String] ?? [:])
+        .reduce(into: [:]) { if let id = Int($1.key) { $0[id] = $1.value } }
+    private func setTarget(_ appID: Int, _ library: String?) {
+        targets[appID] = library
+        UserDefaults.standard.set(Dictionary(uniqueKeysWithValues: targets.map { (String($0.key), $0.value) }), forKey: Self.targetsKey)
+    }
+    /// The library a download of `appID` goes to.
+    func library(for appID: Int) -> String { targets[appID] ?? Self.installLibrary }
+    func steamApps(for appID: Int) -> URL { Self.drive.appendingPathComponent(library(for: appID), isDirectory: true) }
     private static var supportFolder: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return base.appendingPathComponent("Madeira", isDirectory: true)
@@ -969,14 +981,17 @@ final class SteamOwnedLibrary: ObservableObject {
     }
 
     func hasPartialDownload(_ appID: Int) -> Bool {
-        DepotDownloader.hasPartialDownload(appID: UInt32(appID), steamApps: Self.steamApps)
+        DepotDownloader.hasPartialDownload(appID: UInt32(appID), steamApps: steamApps(for: appID))
     }
 
     /// Installs or updates a game: queues it and starts when nothing else downloads.
-    func install(_ appID: Int) {
+    /// `library` picks where a new download goes; nil keeps the earlier choice
+    /// (or the default from Settings › External drives).
+    func install(_ appID: Int, library: String? = nil) {
         guard Self.enabled else { return }
         guard signedIn else { error = "Sign in to Steam to download games."; return }
         if active?.id == appID || queue.contains(appID) { return }
+        if let library { setTarget(appID, library) }
         if inSession {
             resumeAfterSession.insert(appID); downloads[appID] = Download(state: .paused); return
         }
@@ -1005,7 +1020,8 @@ final class SteamOwnedLibrary: ObservableObject {
         pause(appID)
         downloads[appID] = nil
         guard !installed, let game = game(appID) else { return }
-        let apps = Self.steamApps
+        let apps = steamApps(for: appID)
+        setTarget(appID, nil)
         Task { @MainActor in
             await running?.value
             SteamInstallFiles.delete(appID: appID, folderName: game.folderName, steamApps: apps)
@@ -1053,13 +1069,16 @@ final class SteamOwnedLibrary: ObservableObject {
         var outcome = SteamDownloadBackground.Outcome.paused
         do {
             // The chosen drive is unplugged: fail rather than fill this device.
-            if let missing = ExternalDrives.steamInstallMissing {
+            let library = library(for: appID), steamApps = Self.drive.appendingPathComponent(library, isDirectory: true)
+            if targets[appID] == nil, let missing = ExternalDrives.steamInstallMissing {
                 throw SteamDriveMissing(name: missing)
+            }
+            if let name = ExternalDrives.driveName(library: library), !ExternalDrives.isConnected(name) {
+                throw SteamDriveMissing(name: name)
             }
             guard let info = try await fetcher.fetchInstallInfo(appID: UInt32(appID)) else {
                 throw SteamError.appInfoNotFound(UInt32(appID))
             }
-            let library = Self.installLibrary, steamApps = Self.drive.appendingPathComponent(library, isDirectory: true)
             try FileManager.default.createDirectory(at: steamApps.appendingPathComponent("common", isDirectory: true), withIntermediateDirectories: true)
             SteamLog.event("[steam-depot] install app=\(appID) library=\(library)")
             let folder = try await downloader.install(info, steamApps: steamApps,
@@ -1068,6 +1087,9 @@ final class SteamOwnedLibrary: ObservableObject {
                 SteamDownloadBackground.shared.progress(progress)
             }
             downloads[appID] = nil
+            setTarget(appID, nil)
+            // A new library on a drive is listed for Dock and Valve's client.
+            if library.hasPrefix("External/") { ExternalDrives.shared.refreshSteam() }
             // The install record is written last: the game is now "installed" for Dock, and it
             // gets its library entry (its Game details page and settings; an existing one is kept).
             LibraryModel.shared.upsertSteam(DockGame(id: appID, name: info.name, installDir: folder.lastPathComponent,

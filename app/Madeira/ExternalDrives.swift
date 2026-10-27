@@ -135,6 +135,26 @@ final class ExternalDrives: ObservableObject {
         var out = text; out.insert(contentsOf: block, at: end.lowerBound); return out
     }
 
+    /// "External/<name>/..." -> "<name>", or nil for drive_c.
+    static func driveName(library: String) -> String? {
+        let parts = library.split(separator: "/", maxSplits: 2).map(String.init)
+        return parts.count >= 2 && parts[0] == "External" ? parts[1] : nil
+    }
+    static func isConnected(_ name: String) -> Bool {
+        let link = linkRoot.appendingPathComponent(name)
+        return (try? link.resolvingSymlinksInPath().checkResourceIsReachable()) == true && link.resolvingSymlinksInPath() != link
+    }
+    /// Places a Steam game can be installed or moved to: this device's own
+    /// library and <folder>/SteamLibrary on each connected drive.
+    var steamTargets: [(name: String, library: String)] {
+        [("This iPhone", SteamInstallPaths.libraryRelative)] + folders.filter { mounted[$0.id] != nil }
+            .map { ($0.name, "External/\($0.name)/SteamLibrary/steamapps") }
+    }
+    /// Places a non-Steam game can be moved to: drive_c/Games, or <folder>/Games.
+    var gameTargets: [(name: String, root: String)] {
+        [("This iPhone", "Games")] + folders.filter { mounted[$0.id] != nil }.map { ($0.name, "External/\($0.name)/Games") }
+    }
+
     /// Sends Madeira's Steam downloads to this folder (nil: back to drive_c).
     func setSteamInstalls(_ id: UUID?) {
         for i in folders.indices { folders[i].steamInstalls = folders[i].id == id ? true : nil }
@@ -362,6 +382,180 @@ struct ExternalDrivesSection: View {
         }
         .sheet(item: $scanning) { folder in
             if let root = drives.mounted[folder.id] { ExternalGamesSheet(folder: folder, root: root.resolvingSymlinksInPath()) }
+        }
+    }
+}
+
+/// Moves an installed game between this device and external drives: copies
+/// it, checks the copy, then deletes the original. A failed or cancelled move
+/// removes the partial copy and leaves the original as it was.
+@MainActor final class GameMover: ObservableObject {
+    static let shared = GameMover()
+    /// The entry being moved, and how far along (0...1).
+    @Published private(set) var moving: UUID?
+    @Published private(set) var progress = 0.0
+
+    struct Failure: LocalizedError { let errorDescription: String? }
+
+    /// What a non-Steam entry's move takes along: the program's folder, or the
+    /// folder above it when the program sits in a bin/Win64-style subfolder.
+    static func gameFolder(_ relativePath: String) -> String {
+        var parts = relativePath.split(separator: "/").map(String.init).dropLast()
+        let inner: Set<String> = ["bin", "bin32", "bin64", "binaries", "win32", "win64", "x86", "x64", "x86_64", "system", "game", "release", "shipping"]
+        while parts.count > 1, inner.contains(parts.last!.lowercased()) { parts = parts.dropLast() }
+        // Never a top-level container such as "Games" or "External/<name>" itself.
+        return parts.joined(separator: "/")
+    }
+
+    /// Where a library entry is now (a drive name, or "This iPhone").
+    static func place(_ relativePath: String) -> String {
+        ExternalDrives.driveName(library: relativePath) ?? "This iPhone"
+    }
+
+    func move(_ entry: LibraryEntry, toSteamLibrary target: String? = nil, toRoot root: String? = nil) async throws -> LibraryEntry {
+        guard moving == nil else { throw Failure(errorDescription: "Another game is being moved.") }
+        guard wine_process_is_running() == 0 else { throw Failure(errorDescription: "Close the running game first.") }
+        let drive = LibraryModel.drive
+        var entry = entry
+        var items: [(from: URL, to: URL)] = []
+        var newPath: String
+        if let appID = entry.steamAppID {
+            guard SteamOwnedLibrary.shared.downloads[appID] == nil else { throw Failure(errorDescription: "Wait for the download to finish or cancel it first.") }
+            guard let target, let game = SteamGamesModel.shared.games.first(where: { $0.id == appID }) else {
+                throw Failure(errorDescription: "Steam does not list this game as installed.")
+            }
+            guard game.library.caseInsensitiveCompare(target) != .orderedSame else { return entry }
+            let from = drive.appendingPathComponent(game.library, isDirectory: true), to = drive.appendingPathComponent(target, isDirectory: true)
+            items.append((from.appendingPathComponent("common/" + game.installDir), to.appendingPathComponent("common/" + game.installDir)))
+            items.append((from.appendingPathComponent("appmanifest_\(appID).acf"), to.appendingPathComponent("appmanifest_\(appID).acf")))
+            let journal = "downloading/\(appID)"
+            if FileManager.default.fileExists(atPath: from.appendingPathComponent(journal).path) {
+                items.append((from.appendingPathComponent(journal), to.appendingPathComponent(journal)))
+            }
+            newPath = target + "/common/" + game.installDir
+        } else {
+            guard let root else { throw Failure(errorDescription: "Choose where to move the game.") }
+            let folder = Self.gameFolder(entry.relativePath)
+            let name = (folder as NSString).lastPathComponent
+            guard !folder.isEmpty, !["games", "external"].contains(folder.lowercased()), folder.split(separator: "/").count >= (folder.hasPrefix("External/") ? 3 : 1)
+            else { throw Failure(errorDescription: "This game's folder cannot be moved.") }
+            let dest = root + "/" + name
+            guard dest.caseInsensitiveCompare(folder) != .orderedSame else { return entry }
+            items.append((drive.appendingPathComponent(folder, isDirectory: true), drive.appendingPathComponent(dest, isDirectory: true)))
+            newPath = dest + entry.relativePath.dropFirst(folder.count)
+        }
+        if let name = ExternalDrives.driveName(library: newPath), !ExternalDrives.isConnected(name) {
+            throw Failure(errorDescription: "\(name) is not connected.")
+        }
+        let copy = items.map { (from: $0.from.resolvingSymlinksInPath(), to: $0.to) }
+
+        moving = entry.id; progress = 0
+        defer { moving = nil }
+        LogStore.shared.log("[move] \(entry.title): \(entry.relativePath) -> \(newPath)")
+        try await Task.detached(priority: .userInitiated) {
+            try Self.copyVerifyDelete(copy) { fraction in Task { @MainActor in GameMover.shared.progress = fraction } }
+        }.value
+        entry.relativePath = newPath
+        LibraryModel.shared.save(entry)
+        if entry.steamAppID != nil {
+            if newPath.hasPrefix("External/") { ExternalDrives.shared.refreshSteam() }
+            SteamGamesModel.shared.refresh()
+        }
+        LogStore.shared.log("[move] done \(entry.title)")
+        return entry
+    }
+
+    nonisolated private static func copyVerifyDelete(_ items: [(from: URL, to: URL)], progress: @escaping (Double) -> Void) throws {
+        let fm = FileManager.default
+        func files(_ url: URL) -> [(URL, Int64)] {
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else { return [] }
+            if !isDir.boolValue { return [(url, Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0))] }
+            var out: [(URL, Int64)] = []
+            let walker = fm.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey])
+            while let item = walker?.nextObject() as? URL {
+                let values = try? item.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+                if values?.isRegularFile == true { out.append((item, Int64(values?.fileSize ?? 0))) }
+            }
+            return out
+        }
+        let sources = items.map { files($0.from) }
+        let total = sources.flatMap { $0 }.reduce(Int64(0)) { $0 + $1.1 }
+        guard !sources.isEmpty, !(sources.first?.isEmpty ?? true) else { throw Failure(errorDescription: "The game's files were not found.") }
+        for item in items where fm.fileExists(atPath: item.to.path) {
+            throw Failure(errorDescription: "\(item.to.lastPathComponent) already exists there.")
+        }
+        if let parent = items.first?.to.deletingLastPathComponent() {
+            try? fm.createDirectory(at: parent, withIntermediateDirectories: true)
+            if let free = parent.freeSpace, free < total + 256 << 20 {
+                throw Failure(errorDescription: "Not enough free space: \(ByteCountFormatter.string(fromByteCount: total, countStyle: .file)) needed.")
+            }
+        }
+        var done: Int64 = 0, lastReport = Date.distantPast
+        do {
+            for (index, item) in items.enumerated() {
+                let base = item.from.path
+                for (file, size) in sources[index] {
+                    let relative = file.path == base ? "" : String(file.path.dropFirst(base.count + 1))
+                    let dest = relative.isEmpty ? item.to : item.to.appendingPathComponent(relative)
+                    try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try fm.copyItem(at: file, to: dest)
+                    let copied = Int64((try? dest.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? -1)
+                    guard copied == size else { throw Failure(errorDescription: "The copy of \(file.lastPathComponent) does not match.") }
+                    done += size
+                    if Date().timeIntervalSince(lastReport) > 0.2 { lastReport = Date(); progress(total > 0 ? Double(done) / Double(total) : 1) }
+                }
+            }
+            // Check the whole copy before anything is deleted.
+            for (index, item) in items.enumerated() {
+                let copied = files(item.to)
+                guard copied.count == sources[index].count, copied.reduce(0, { $0 + $1.1 }) == sources[index].reduce(0, { $0 + $1.1 }) else {
+                    throw Failure(errorDescription: "The copy is incomplete.")
+                }
+            }
+        } catch {
+            for item in items { try? fm.removeItem(at: item.to) }
+            throw error
+        }
+        progress(1)
+        for item in items { try? fm.removeItem(at: item.from) }
+    }
+}
+
+/// Game details › Location: where the game is and Move to.
+struct GameMoveSection: View {
+    @Binding var entry: LibraryEntry
+    @ObservedObject private var mover = GameMover.shared
+    @ObservedObject private var drives = ExternalDrives.shared
+    @State private var error: String?
+
+    var body: some View {
+        let here = GameMover.place(entry.relativePath)
+        let steam = entry.steamAppID != nil
+        let targets: [(name: String, value: String)] = steam ? drives.steamTargets.map { ($0.name, $0.library) } : drives.gameTargets.map { ($0.name, $0.root) }
+        Section {
+            LabeledContent("Installed on", value: here)
+            if mover.moving == entry.id {
+                ProgressView(value: mover.progress) { Text("Moving") }
+            } else if targets.count > 1 {
+                Menu("Move to") {
+                    ForEach(targets.filter { $0.name != here }, id: \.value) { target in
+                        Button(target.name) { start(target.value, steam: steam) }
+                    }
+                }
+                .disabled(mover.moving != nil)
+            }
+            if let error { Text(error).foregroundStyle(.red) }
+        } header: { Text("Location") } footer: {
+            Text("Moving copies the game, checks the copy, then deletes the original. Keep the drive connected until it finishes.")
+        }
+    }
+
+    private func start(_ value: String, steam: Bool) {
+        error = nil
+        Task {
+            do { entry = try await GameMover.shared.move(entry, toSteamLibrary: steam ? value : nil, toRoot: steam ? nil : value) }
+            catch { self.error = error.localizedDescription }
         }
     }
 }
